@@ -45,7 +45,7 @@ static struct {
     pthread_mutex_t lock;     /* health, last_error, repairs (read by on_oper) */
     pthread_mutex_t txn_lock; /* the device, g.txn and pending: callbacks vs. reconcile */
     int degraded;
-    char last_error[512];
+    char last_error[1024];
     uint64_t repairs;
     struct {
         int used;
@@ -343,7 +343,7 @@ static int on_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, 
     const struct lys_module *mod;
     struct lsw_state dev;
     struct lyd_node *pn, *vn;
-    char err[512], vid[8], num[24];
+    char err[1024], vid[8], num[24];
     int rc = SR_ERR_OK, degraded;
     uint64_t repairs;
     (void)sub_id; (void)module; (void)path; (void)request_xpath; (void)op_id; (void)priv;

@@ -21,7 +21,7 @@ static struct {
     void (*log)(const char *msg);
     pthread_mutex_t lock; /* health, last_error, repairs */
     int degraded;
-    char last_error[512];
+    char last_error[1024];
     uint64_t repairs;
     struct {
         int used;
@@ -244,7 +244,7 @@ int routes_on_oper(sr_session_ctx_t *sess, struct lyd_node **parent)
 {
     const struct ly_ctx *ctx = sr_session_acquire_context(sess);
     const struct lys_module *mod = ly_ctx_get_module_implemented(ctx, ROUTE_MODULE);
-    char err[512], num[24];
+    char err[1024], num[24];
     int degraded, rc = SR_ERR_OK;
     uint64_t repairs;
 
