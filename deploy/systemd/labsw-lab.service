@@ -1,0 +1,12 @@
+[Unit]
+Description=labsw lab ports (br0, veth p1..p4, hosts h1..h4)
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/labsw/sbin/lab_up.sh
+ExecStop=/opt/labsw/sbin/lab_down.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=labsw agent (labsw-switch <-> br0, labsw-route <-> FRR)
+After=labsw-lab.service netopeer2.service frr.service
+Requires=labsw-lab.service
+Wants=frr.service
+
+[Service]
+# -R 10: every 10 s put back what was changed outside NETCONF
+ExecStart=/opt/labsw/sbin/labswd -b br0 -f /usr/bin/vtysh -R 10
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

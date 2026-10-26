@@ -409,8 +409,10 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *bridge = "br0", *adapter = "bridge", *mock_state = NULL, *trace = NULL;
-    const char *vtysh = NULL, *frr_ns = NULL, *mock_routes = NULL;
+    const char *bridge = "br0", *vtysh = NULL, *frr_ns = NULL;
+#ifdef LSW_TESTING
+    const char *adapter = "bridge", *mock_state = NULL, *trace = NULL, *mock_routes = NULL;
+#endif
     struct lsw_route_adapter *ra = NULL;
     int route_fail_at = 0;
     sr_conn_ctx_t *conn = NULL;

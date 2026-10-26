@@ -1,0 +1,11 @@
+[Unit]
+Description=Netopeer2 NETCONF server (labsw)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/labsw/sbin/netopeer2-server -d -v1
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
