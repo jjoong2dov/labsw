@@ -96,7 +96,9 @@ module labsw-switch {
   container switch-state {
     config false;
     description
-      "What the agent reads back from the bridge.";
+      "What the agent reads back from the bridge. While a change or
+       a repair is being applied, the ports are the last state read
+       before it (the bridge itself is half way then).";
     leaf health {
       type enumeration {
         enum ok;

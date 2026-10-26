@@ -62,6 +62,8 @@ static struct {
         struct lsw_state want; /* what the change applied */
     } pending[MAX_PENDING];
     atomic_uint callbacks; /* bumped when a change callback starts; reconcile checks it */
+    struct lsw_state seen; /* last device state read while no change ran (g.lock) */
+    int seen_valid;
 } g = {.lock = PTHREAD_MUTEX_INITIALIZER, .txn_lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void log_line(const char *msg)
@@ -456,10 +458,24 @@ static int on_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, 
         rc = SR_ERR_LY;
         goto end;
     }
-    if (g.a->read(g.a, &dev, err, sizeof(err))) {
-        logf_("oper: %s", err);
-        rc = SR_ERR_OPERATION_FAILED;
-        goto end;
+    /* while a change or a repair runs the device is half way; show the last state
+     * read outside one instead of waiting (waiting here could stall sysrepo) */
+    if (pthread_mutex_trylock(&g.txn_lock) == 0) {
+        int bad = g.a->read(g.a, &dev, err, sizeof(err));
+        pthread_mutex_unlock(&g.txn_lock);
+        if (bad) {
+            logf_("oper: %s", err);
+            rc = SR_ERR_OPERATION_FAILED;
+            goto end;
+        }
+        pthread_mutex_lock(&g.lock);
+        g.seen_valid = lsw_state_copy(&g.seen, &dev) == 0;
+        pthread_mutex_unlock(&g.lock);
+    } else {
+        pthread_mutex_lock(&g.lock);
+        if (g.seen_valid)
+            lsw_state_copy(&dev, &g.seen);
+        pthread_mutex_unlock(&g.lock);
     }
     for (int i = 0; i < dev.nports; i++) {
         const struct lsw_port *p = &dev.port[i];
@@ -556,6 +572,8 @@ int main(int argc, char **argv)
     for (int i = 0; i < MAX_PENDING; i++)
         if (lsw_state_init(&g.pending[i].snap) || lsw_state_init(&g.pending[i].want))
             return 1;
+    if (lsw_state_init(&g.seen))
+        return 1;
     g.txn.a = g.a;
     g.txn.deadline_ms = deadline; /* below sysrepo's 5 s callback timeout */
     g.txn.log = log_line;
@@ -606,5 +624,6 @@ end:
         lsw_state_free(&g.pending[i].want);
     }
     free(rwant);
+    lsw_state_free(&g.seen);
     return rc ? 1 : 0;
 }
