@@ -98,7 +98,7 @@ def run_remote(args, out):
     secs = time.monotonic() - t0
     sh(scp + ["-q", f"{host}:{rdir}/junit.xml", str(out / "junit.xml")])
     ver = subprocess.run(ssh + [f"uname -srm; {args.prefix}/sbin/netopeer2-server -V; "
-                                "/usr/bin/vtysh -c 'show version' | head -1"], capture_output=True, text=True)
+                                "sudo /usr/bin/vtysh -c 'show version' | head -1"], capture_output=True, text=True)
     return {"command": remote, "seconds": round(secs, 1), **junit_counts(out / "junit.xml"),
             "versions": ver.stdout.strip().splitlines()}
 
