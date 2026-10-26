@@ -1,13 +1,14 @@
-"""NETCONF -> sysrepo -> labswd -> mock device, on the host (no root).
-
-A PASS here says the sysrepo orchestration works; it says nothing about the
-Linux bridge. The same scenarios against a real bridge run on vm/pi.
+"""NETCONF -> sysrepo -> labswd -> device. The same scenarios for both targets
+(conftest.py): with the mock a PASS says the sysrepo side works, nothing about the
+Linux bridge; LABSW_TARGET=bridge runs them against a real bridge (VM, Pi).
 SPDX-License-Identifier: MIT
 """
+import time
+
 import pytest
 from ncclient.operations import RPCError
 
-from conftest import NS
+from conftest import NS, wait_for
 
 
 def vlan_xml(vids):
@@ -103,9 +104,7 @@ def health(m):
 
 
 def test_vlan_filtering_off_agent_starts_degraded(lab):
-    st = lab.read_state()
-    st["vlan_filtering"] = False
-    lab.write_state(st)
+    lab.dev.set_filtering(False)
     lab.start_agent()  # must not exit: without a subscriber every edit would be accepted
     with lab.nc() as m:
         assert health(m) == "degraded"
@@ -113,8 +112,7 @@ def test_vlan_filtering_off_agent_starts_degraded(lab):
             edit(m, ACCESS10)
         assert "vlan_filtering is off" in e.value.message
         assert lab.trace_lines() == []
-        st["vlan_filtering"] = True
-        lab.write_state(st)
+        lab.dev.set_filtering(True)
         edit(m, ACCESS10)
         assert health(m) == "ok"
     assert lab.ports() == ACCESS10_DEV
@@ -193,11 +191,55 @@ def test_start_applies_running_and_fixes_drift(lab):
     with lab.nc() as m:
         edit(m, ACCESS10)
     lab.stop("labswd")
-    st = lab.read_state()                  # someone changes the device while
-    st["ports"]["p1"] = []                 # the agent is not running
-    st["ports"]["p3"] = [{"vid": 99, "pvid": True, "untagged": True}]
-    lab.write_state(st)
+    # someone changes the device while the agent is not running
+    lab.dev.set_ports({"p1": {}, "p3": {99: (True, True)}})
     lab.start_agent()
+    assert lab.ports() == ACCESS10_DEV
+
+
+def oper_leaf(m, leaf):
+    st = m.get(filter=("subtree", f'<switch-state xmlns="{NS}"/>')).data_xml
+    return st.split(f"<{leaf}>")[1].split(f"</{leaf}>")[0] if f"<{leaf}>" in st else None
+
+
+def test_drift_stays_without_reconcile(lab):
+    """default (-R not given): the agent only acts on NETCONF changes and at start"""
+    lab.start_agent()
+    with lab.nc() as m:
+        edit(m, ACCESS10)
+        lab.dev.set_ports({"p1": {99: (True, True)}})
+        time.sleep(3)
+        assert lab.ports()["p1"] == {99: (True, True)}
+        assert oper_leaf(m, "repairs") == "0"
+
+
+def test_drift_is_repaired_while_running(lab):
+    lab.start_agent(every=1)
+    with lab.nc() as m:
+        edit(m, ACCESS10)
+        assert oper_leaf(m, "repairs") == "0"
+        lab.dev.set_ports({"p1": {99: (True, True)}, "p3": {10: (False, False)}})
+        wait_for(lambda: lab.ports() == ACCESS10_DEV, "the agent to repair the drift", timeout=30)
+        assert oper_leaf(m, "repairs") == "1"
+        assert oper_leaf(m, "health") == "ok"
+        n = len(lab.trace_lines())
+        edit(m, ACCESS10)              # NETCONF still works and is a no-op
+        time.sleep(2.5)                # two more rounds without drift
+        assert len(lab.trace_lines()) == n
+        assert oper_leaf(m, "repairs") == "1"
+    assert "reconcile: device differs from running" in lab.log("labswd")
+
+
+def test_reconcile_cannot_repair_filtering_off(lab):
+    lab.start_agent(every=1)
+    with lab.nc() as m:
+        edit(m, ACCESS10)
+        lab.dev.set_filtering(False)
+        lab.dev.set_ports({"p1": {}})
+        wait_for(lambda: oper_leaf(m, "health") == "degraded", "health degraded", timeout=30)
+        assert "vlan_filtering is off" in oper_leaf(m, "last-error")
+        lab.dev.set_filtering(True)
+        wait_for(lambda: oper_leaf(m, "health") == "ok", "health ok again", timeout=30)
     assert lab.ports() == ACCESS10_DEV
 
 
@@ -207,7 +249,7 @@ def test_agent_killed_between_change_and_done(lab):
     with lab.nc() as m:
         edit(m, ACCESS10)
     lab.stop("labswd", sig=9)
-    lab.write_state({"vlan_filtering": True, "ports": {"p1": [], "p2": [], "p3": []}})
+    lab.dev.set_ports({"p1": {}, "p2": {}, "p3": {}})
     lab.start_agent()
     assert lab.ports() == ACCESS10_DEV
 
@@ -219,3 +261,19 @@ def test_delete_port_removes_its_vlans(lab):
         edit(m, port_xml("p2", {}, op="delete"))
     assert lab.ports()["p2"] == {}
     assert lab.ports()["p1"] == {10: (True, True)}
+
+
+def test_traffic_follows_vlans(lab):
+    if not isinstance(lab.dev, __import__("conftest").BridgeDevice):
+        pytest.skip("needs LABSW_TARGET=bridge")
+    lab.start_agent()
+    for i in (1, 2, 3):
+        lab.dev.host_ip(i, f"192.0.2.{i}/24")
+    with lab.nc() as m:
+        edit(m, vlan_xml([10, 20]) + port_xml("p1", {10: (True, "untagged")}) +
+             port_xml("p2", {10: (True, "untagged")}) + port_xml("p3", {20: (True, "untagged")}))
+        assert lab.dev.ping(1, "192.0.2.2"), "same VLAN 10"
+        assert not lab.dev.ping(1, "192.0.2.3"), "VLAN 10 -> VLAN 20"
+        # move p3 into VLAN 10: now it answers
+        edit(m, port_xml("p3", {10: (True, "untagged")}, op="replace"))
+        assert lab.dev.ping(1, "192.0.2.3"), "p3 moved to VLAN 10"

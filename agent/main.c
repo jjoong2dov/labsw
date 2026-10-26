@@ -10,6 +10,10 @@
  * If the agent dies between CHANGE and DONE, nothing restores the device; the
  * next start (ENABLED) makes it equal to running again.
  *
+ * With -R n the agent also compares running with the device every n seconds and
+ * puts back what someone changed outside NETCONF (policy: NETCONF wins). It
+ * skips a round while a change is between CHANGE and DONE/ABORT.
+ *
  * SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include <getopt.h>
@@ -19,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <libyang/libyang.h>
 #include <sysrepo.h>
@@ -34,15 +39,17 @@ static struct {
     struct lsw_adapter *a;
     struct lsw_txn txn;
     int verbose;
-    pthread_mutex_t lock;
+    pthread_mutex_t lock;     /* health, last_error, repairs (read by on_oper) */
+    pthread_mutex_t txn_lock; /* the device, g.txn and pending: callbacks vs. reconcile */
     int degraded;
     char last_error[512];
+    uint64_t repairs;
     struct {
         int used;
         uint32_t op_id;
         struct lsw_state snap;
     } pending[MAX_PENDING];
-} g = {.lock = PTHREAD_MUTEX_INITIALIZER};
+} g = {.lock = PTHREAD_MUTEX_INITIALIZER, .txn_lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void log_line(const char *msg)
 {
@@ -176,13 +183,11 @@ static int pending_slot(uint32_t op_id, int create)
     return free_slot;
 }
 
-static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *xpath,
-                     sr_event_t event, uint32_t op_id, void *priv)
+static int on_change_locked(sr_session_ctx_t *sess, sr_event_t event, uint32_t op_id)
 {
     struct lsw_state want, snap;
     char err[1024] = "";
     int rc = SR_ERR_OK, slot;
-    (void)sub_id; (void)module; (void)xpath; (void)priv;
 
     if (event == SR_EV_DONE || event == SR_EV_ABORT) {
         slot = pending_slot(op_id, 0);
@@ -253,6 +258,62 @@ end:
     return rc;
 }
 
+static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *xpath,
+                     sr_event_t event, uint32_t op_id, void *priv)
+{
+    int rc;
+    (void)sub_id; (void)module; (void)xpath; (void)priv;
+
+    pthread_mutex_lock(&g.txn_lock);
+    rc = on_change_locked(sess, event, op_id);
+    pthread_mutex_unlock(&g.txn_lock);
+    return rc;
+}
+
+/* make the device equal to running again if something else changed it */
+static void reconcile(sr_session_ctx_t *sess)
+{
+    struct lsw_state want, dev, snap;
+    char err[1024], why[160];
+
+    if (lsw_state_init(&want) || lsw_state_init(&dev) || lsw_state_init(&snap))
+        goto end;
+    pthread_mutex_lock(&g.txn_lock);
+    for (int i = 0; i < MAX_PENDING; i++)
+        if (g.pending[i].used)
+            goto unlock; /* a change is open; its DONE or ABORT decides */
+    if (read_wanted(sess, &want, err, sizeof(err)) || g.a->read(g.a, &dev, err, sizeof(err))) {
+        logf_("reconcile: %s", err);
+        goto unlock;
+    }
+    if (!lsw_state_diff(&dev, &want, why, sizeof(why)))
+        goto unlock;
+    logf_("reconcile: device differs from running (%s), applying running", why);
+    switch (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err))) {
+    case LSW_TXN_OK:
+        pthread_mutex_lock(&g.lock);
+        g.repairs++;
+        pthread_mutex_unlock(&g.lock);
+        set_health(0, NULL);
+        logf_("reconcile: ok");
+        break;
+    case LSW_TXN_FAILED:
+        set_health(1, err); /* the device still differs from running */
+        logf_("reconcile: %s", err);
+        break;
+    case LSW_TXN_FAILED_DEGRADED:
+        set_health(1, err);
+        logf_("reconcile: %s", err);
+        break;
+    }
+unlock:
+    pthread_mutex_unlock(&g.txn_lock);
+end:
+    lsw_state_free(&want);
+    lsw_state_free(&dev);
+    lsw_state_free(&snap);
+}
+
 static int on_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *path,
                    const char *request_xpath, uint32_t op_id, struct lyd_node **parent, void *priv)
 {
@@ -260,8 +321,9 @@ static int on_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, 
     const struct lys_module *mod;
     struct lsw_state dev;
     struct lyd_node *pn, *vn;
-    char err[512], vid[8];
+    char err[512], vid[8], num[24];
     int rc = SR_ERR_OK, degraded;
+    uint64_t repairs;
     (void)sub_id; (void)module; (void)path; (void)request_xpath; (void)op_id; (void)priv;
 
     if (lsw_state_init(&dev))
@@ -274,9 +336,12 @@ static int on_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, 
     }
     pthread_mutex_lock(&g.lock);
     degraded = g.degraded;
+    repairs = g.repairs;
     snprintf(err, sizeof(err), "%s", g.last_error);
     pthread_mutex_unlock(&g.lock);
+    snprintf(num, sizeof(num), "%llu", (unsigned long long)repairs);
     if (lyd_new_term(*parent, mod, "health", degraded ? "degraded" : "ok", 0, NULL) ||
+        lyd_new_term(*parent, mod, "repairs", num, 0, NULL) ||
         (err[0] && lyd_new_term(*parent, mod, "last-error", err, 0, NULL))) {
         rc = SR_ERR_LY;
         goto end;
@@ -313,7 +378,7 @@ end:
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: labswd [-b bridge] [-P priority] [-v]\n"
+    fprintf(stderr, "usage: labswd [-b bridge] [-P priority] [-R seconds] [-v]\n"
 #ifdef LSW_TESTING
                     "       labswd -a mock -m state.json [-t trace.txt] [-F n]   (test build)\n"
 #endif
@@ -328,14 +393,15 @@ int main(int argc, char **argv)
     sr_subscription_ctx_t *sub = NULL;
     sigset_t sigs;
     uint32_t prio = 0;
-    int opt, rc = 1, sig;
+    int opt, rc = 1, sig, every = 0;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    while ((opt = getopt(argc, argv, "b:P:a:m:t:F:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "b:P:R:a:m:t:F:vh")) != -1) {
         switch (opt) {
         case 'b': bridge = optarg; break;
         case 'v': g.verbose = 1; break;
         case 'P': prio = (uint32_t)strtoul(optarg, NULL, 10); break;
+        case 'R': every = atoi(optarg); break;
 #ifdef LSW_TESTING
         case 'a': adapter = optarg; break;
         case 'm': mock_state = optarg; break;
@@ -380,7 +446,14 @@ int main(int argc, char **argv)
         goto end;
     }
     logf_("running (adapter %s)", g.a->name);
-    sigwait(&sigs, &sig);
+    for (;;) {
+        struct timespec ts = {.tv_sec = every};
+        sig = every > 0 ? sigtimedwait(&sigs, NULL, &ts) : sigwaitinfo(&sigs, NULL);
+        if (sig > 0)
+            break;
+        if (every > 0)
+            reconcile(sess); /* timeout (or EINTR): one round */
+    }
     logf_("signal %d, stopping", sig);
     rc = 0;
 end:

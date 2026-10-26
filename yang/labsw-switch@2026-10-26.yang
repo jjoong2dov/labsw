@@ -110,6 +110,12 @@ module labsw-switch {
     leaf last-error {
       type string;
     }
+    leaf repairs {
+      type uint64;
+      description
+        "How many times the agent found the bridge different from
+         running (changed outside NETCONF) and put running back.";
+    }
     list port {
       key "name";
       leaf name {
