@@ -9,3 +9,4 @@
 | `frr_running_two_routes.json` | 같은 VM, FRR 10.3-3+deb13u1 에서 `vtysh -c "show mgmt datastore-contents running json"` 실제 출력. 198.51.100.0/24 via 203.0.113.9, 198.51.100.128/25 blackhole |
 | `frr_running_two_nexthops.json` | 위 상태에서 `ip route 198.51.100.0/24 203.0.113.10` 을 더한 뒤 실제 출력(한 prefix 에 next hop 둘) |
 | `frr_running_empty.json` | 정적 경로를 모두 지운 뒤 실제 출력 |
+| `frr_running_after_start.json` | 같은 VM 을 재부팅한 직후(정적 경로를 한 번도 설정하지 않은 FRR) 같은 명령의 실제 출력: `{}` 뿐 |

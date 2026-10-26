@@ -106,6 +106,12 @@ static void test_parse_real(void **st)
     assert_int_equal(r.n, 0);
     free(j);
 
+    /* FRR 10.3 right after it started, nothing configured yet */
+    j = slurp("frr_running_after_start.json");
+    assert_int_equal(lsw_frr_parse(j, &r, err, sizeof(err)), 0);
+    assert_int_equal(r.n, 0);
+    free(j);
+
     j = slurp("frr_running_two_nexthops.json");
     assert_int_equal(lsw_frr_parse(j, &r, err, sizeof(err)), -1);
     assert_string_equal(err, "route 198.51.100.0/24: 2 next hops, only one is supported");
@@ -143,12 +149,12 @@ static void test_parse_bad(void **st)
                                    "\"gateway\":\"198.51.100.1\",\"interface\":\"eth0\"}]}}]}]}}]}}}",
                                    &r, err, sizeof(err)), -1);
     assert_string_equal(err, "route 192.0.2.0/24: next hop interface eth0 is not supported");
-    /* fail closed: a shape we do not know is not "no routes" */
-    assert_int_equal(lsw_frr_parse("{}", &r, err, sizeof(err)), -1);
+    /* fail closed: once frr-routing:routing is there, a shape we do not know is not "no routes" */
+    assert_int_equal(lsw_frr_parse("{\"frr-routing:routing\":{}}", &r, err, sizeof(err)), -1);
     assert_string_equal(err, "FRR output has no frr-routing:routing/control-plane-protocols/control-plane-protocol");
     assert_int_equal(lsw_frr_parse("{\"frr-routing:routing\":{\"control-plane-protocols\":{\"control-plane-protocol\":[]}}}",
-                                   &r, err, sizeof(err)), -1);
-    assert_string_equal(err, "FRR output has no staticd in VRF default (is staticd running?)");
+                                   &r, err, sizeof(err)), 0);
+    assert_int_equal(r.n, 0);
     assert_int_equal(lsw_frr_parse("{\"frr-routing:routing\":{\"control-plane-protocols\":{\"control-plane-protocol\":{}}}}",
                                    &r, err, sizeof(err)), -1);
 #define ONE(path_extra, nh_extra)                                                                                   \

@@ -127,7 +127,7 @@ int lsw_frr_parse(const char *json, struct lsw_routes *out, char *err, size_t le
 {
     struct json_tokener *tok = json_tokener_new();
     struct json_object *root, *protos;
-    int rc = -1, staticd = 0;
+    int rc = -1;
 
     lsw_routes_clear(out);
     if (!tok)
@@ -139,8 +139,13 @@ int lsw_frr_parse(const char *json, struct lsw_routes *out, char *err, size_t le
         snprintf(err, len, "FRR output is not one JSON object");
         goto end;
     }
-    /* a shape we do not know is an error, never "no routes": that would make the
-     * agent add every route of running on top of whatever FRR really has */
+    /* FRR 10.3 prints {} when nothing was configured since it started: no routes.
+     * Once frr-routing:routing is there, a shape we do not know is an error, never
+     * "no routes" (that would add every route of running on top of what FRR has). */
+    if (!json_object_object_get_ex(root, "frr-routing:routing", &protos)) {
+        rc = 0;
+        goto end;
+    }
     protos = get(get(get(root, "frr-routing:routing", json_type_object), "control-plane-protocols", json_type_object),
                  "control-plane-protocol", json_type_array);
     if (!protos) {
@@ -161,7 +166,6 @@ int lsw_frr_parse(const char *json, struct lsw_routes *out, char *err, size_t le
             }
             continue;
         }
-        staticd = 1;
         if (!json_object_object_get_ex(p, "frr-staticd:staticd", &sd))
             continue; /* no static routes at all */
         if (!json_object_is_type(sd, json_type_object) ||
@@ -174,11 +178,7 @@ int lsw_frr_parse(const char *json, struct lsw_routes *out, char *err, size_t le
             if (one_route(json_object_array_get_idx(routes, j), out, err, len))
                 goto end;
     }
-    if (!staticd) {
-        snprintf(err, len, "FRR output has no staticd in VRF default (is staticd running?)");
-        goto end;
-    }
-    rc = 0;
+    rc = 0; /* no staticd entry: no static routes */
 end:
     json_object_put(root);
     json_tokener_free(tok);

@@ -22,9 +22,14 @@ NP2_MODULE_DIR=$P/share/yang/modules/netopeer2 LN2_MODULE_DIR=$P/share/yang/modu
   bash $P/share/netopeer2/scripts/setup.sh >/dev/null
 bash $P/share/netopeer2/scripts/merge_hostkey.sh >/dev/null
 bash $P/share/netopeer2/scripts/merge_config.sh >/dev/null
-for m in $P/share/yang/modules/labsw/*.yang; do
-  name=$(basename "$m" .yang); name=${name%@*}
-  if sysrepoctl -l | grep -q "^$name "; then sysrepoctl -U "$m"; else sysrepoctl -i "$m"; fi
+# the modules of this bundle only (the directory may hold files of an older install);
+# a module already there with the same revision is left as it is
+for m in yang/*.yang; do
+  name=$(basename "$m" .yang); rev=${name#*@}; name=${name%@*}
+  have=$(sysrepoctl -l | awk -F'|' -v n="$name" '{gsub(/ /,"",$1); gsub(/ /,"",$2)} $1==n {print $2}')
+  if [ -z "$have" ]; then sysrepoctl -i "$P/share/yang/modules/labsw/$(basename "$m")"
+  elif [ "$have" != "$rev" ]; then sysrepoctl -U "$P/share/yang/modules/labsw/$(basename "$m")"
+  fi
 done
 sed "s/NC_USER/$NC_USER/" nacm_admin.xml > /tmp/labsw-nacm.xml
 sysrepocfg --import=/tmp/labsw-nacm.xml -d startup -m ietf-netconf-acm -f xml
