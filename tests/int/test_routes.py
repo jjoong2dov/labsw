@@ -138,3 +138,23 @@ def test_one_edit_two_modules_applied_together(lab):
         m.edit_config(target="running", config=cfg)
     assert lab.dev.routes() == TWO_DEV
     assert lab.ports() == ACCESS10_DEV
+
+
+@pytest.mark.parametrize("route_fail_at", [1, 2])
+def test_route_failure_undoes_switch_in_same_edit(lab, route_fail_at):
+    """the route part fails inside labswd: the switch part, already applied (or not
+    yet, depending on the order sysrepo calls the modules), ends as before"""
+    lab.start_agent(route_fail_at=route_fail_at)
+    with lab.nc() as m:
+        cfg = (f'<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">'
+               f'<switch xmlns="urn:example:labsw-switch">{ACCESS10}</switch>'
+               f'<routes xmlns="{RNS}">{TWO}</routes></config>')
+        with pytest.raises(RPCError) as e:
+            m.edit_config(target="running", config=cfg)
+        assert "injected failure" in e.value.message
+        assert rstate(m, "health") == "ok"
+    assert lab.dev.routes() == {}
+    assert lab.ports() == {"p1": {}, "p2": {}, "p3": {}}
+    log = lab.log("labswd")
+    order = "switch first" if log.find("op ") < log.find("routes op") else "routes first"
+    print("module order:", order)

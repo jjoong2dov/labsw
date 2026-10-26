@@ -5,8 +5,16 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "plan.h"
+
+long long lsw_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static void logf_(struct lsw_txn *t, const char *fmt, ...)
 {
@@ -27,7 +35,12 @@ static int run_step(struct lsw_txn *t, const struct lsw_step *s, char *err, size
     int rc;
 
     lsw_step_text(s, txt, sizeof(txt));
-    if (!t->restoring && t->fail_at && ++t->cmd_count == t->fail_at) {
+    if (!t->restoring && t->deadline_ms && lsw_now_ms() - t->started_ms > t->deadline_ms) {
+        /* sysrepo gives a change callback 5 s by default; past that the client
+         * has its error and a late change would land on a rejected edit */
+        snprintf(err, len, "apply took longer than %d ms, stopped before %s", t->deadline_ms, txt);
+        rc = -1;
+    } else if (!t->restoring && t->fail_at && ++t->cmd_count == t->fail_at) {
         snprintf(err, len, "injected failure at command %d (%s)", t->fail_at, txt);
         rc = -1;
     } else if (s->op == LSW_OP_DEL) {
@@ -96,6 +109,7 @@ enum lsw_txn_result lsw_txn_apply(struct lsw_txn *t, const struct lsw_state *wan
     if (lsw_state_init(&now))
         return LSW_TXN_FAILED;
     t->cmd_count = 0;
+    t->started_ms = lsw_now_ms();
     if (t->a->check(t->a, err, errlen))
         goto end; /* nothing was changed */
     if (t->a->read(t->a, snapshot, err, errlen))

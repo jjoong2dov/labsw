@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <libyang/libyang.h>
 #include <sysrepo/error_format.h>
@@ -15,6 +16,7 @@
 #include "core/rtxn.h"
 
 #define MAX_PENDING 8
+#define PENDING_MAX_AGE 60
 
 static struct {
     struct lsw_rtxn txn;
@@ -26,7 +28,9 @@ static struct {
     struct {
         int used;
         uint32_t op_id;
-        struct lsw_routes *snap;
+        time_t since;
+        struct lsw_routes *snap; /* before the change */
+        struct lsw_routes *want; /* what it applied */
     } pending[MAX_PENDING];
 } r = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
@@ -49,14 +53,16 @@ static void set_health(int degraded, const char *err)
     pthread_mutex_unlock(&r.lock);
 }
 
-int routes_init(struct lsw_route_adapter *a, int fail_at, void (*log)(const char *msg))
+int routes_init(struct lsw_route_adapter *a, int fail_at, int deadline_ms, void (*log)(const char *msg))
 {
     r.txn.a = a;
+    r.txn.deadline_ms = deadline_ms;
     r.txn.fail_at = fail_at;
     r.txn.log = log;
     r.log = log;
     for (int i = 0; i < MAX_PENDING; i++)
-        if (!(r.pending[i].snap = malloc(sizeof(struct lsw_routes))))
+        if (!(r.pending[i].snap = malloc(sizeof(struct lsw_routes))) ||
+            !(r.pending[i].want = malloc(sizeof(struct lsw_routes))))
             return -1;
     return 0;
 }
@@ -65,8 +71,10 @@ void routes_cleanup(void)
 {
     if (r.txn.a)
         r.txn.a->destroy(r.txn.a);
-    for (int i = 0; i < MAX_PENDING; i++)
+    for (int i = 0; i < MAX_PENDING; i++) {
         free(r.pending[i].snap);
+        free(r.pending[i].want);
+    }
 }
 
 /* /labsw-route:routes of the session's view; a prefix with host bits is
@@ -108,33 +116,51 @@ end:
     return rc;
 }
 
-static int pending_slot(uint32_t op_id, int create)
+static int pending_find(uint32_t op_id)
 {
-    int free_slot = -1, used = 0, last = -1;
-
-    for (int i = 0; i < MAX_PENDING; i++) {
+    for (int i = 0; i < MAX_PENDING; i++)
         if (r.pending[i].used && r.pending[i].op_id == op_id)
             return i;
-        if (r.pending[i].used) {
-            used++;
-            last = i;
-        } else if (free_slot < 0) {
-            free_slot = i;
+    return -1;
+}
+
+static int pending_new(uint32_t op_id)
+{
+    for (int i = 0; i < MAX_PENDING; i++) {
+        if (!r.pending[i].used) {
+            r.pending[i].used = 1;
+            r.pending[i].op_id = op_id;
+            r.pending[i].since = time(NULL);
+            return i;
         }
     }
-    if (!create) {
-        /* see pending_slot() in main.c: sysrepo 5.1.0 self-generated ABORT */
-        if (used == 1) {
-            logf_("routes op %u: no such change, taking the only open one (op %u)", op_id, r.pending[last].op_id);
-            return last;
-        }
+    return -1;
+}
+
+/* see pending_for_abort() in main.c (sysrepo 5.1.0 self-generated ABORT) */
+static int pending_for_abort(uint32_t op_id)
+{
+    struct lsw_routes *now;
+    char err[256], why[160];
+    int i = pending_find(op_id), only = -1, n = 0;
+
+    if (i >= 0)
+        return i;
+    for (int k = 0; k < MAX_PENDING; k++)
+        if (r.pending[k].used && n++ == 0)
+            only = k;
+    if (n != 1 || !(now = malloc(sizeof(*now))))
         return -1;
+    if (r.txn.a->read(r.txn.a, now, err, sizeof(err)) || lsw_routes_diff(now, r.pending[only].want, why, sizeof(why))) {
+        logf_("routes op %u: ABORT names no open change, and FRR is not what op %u applied", op_id,
+              r.pending[only].op_id);
+        only = -1;
+    } else {
+        logf_("routes op %u: ABORT names no open change; the only open one is op %u and FRR has what it "
+              "applied, restoring that", op_id, r.pending[only].op_id);
     }
-    if (free_slot < 0)
-        return -1;
-    r.pending[free_slot].used = 1;
-    r.pending[free_slot].op_id = op_id;
-    return free_slot;
+    free(now);
+    return only;
 }
 
 int routes_on_change(sr_session_ctx_t *sess, sr_event_t event, uint32_t op_id)
@@ -144,9 +170,11 @@ int routes_on_change(sr_session_ctx_t *sess, sr_event_t event, uint32_t op_id)
     int rc = SR_ERR_OK, slot;
 
     if (event == SR_EV_DONE || event == SR_EV_ABORT) {
-        if ((slot = pending_slot(op_id, 0)) < 0) {
-            if (event == SR_EV_ABORT)
-                logf_("routes op %u: ABORT for a change we do not know", op_id);
+        if ((slot = event == SR_EV_ABORT ? pending_for_abort(op_id) : pending_find(op_id)) < 0) {
+            if (event == SR_EV_ABORT) {
+                logf_("routes op %u: ABORT for a change we do not know; reconcile decides", op_id);
+                set_health(1, "an ABORT could not be matched to a change");
+            }
             return SR_ERR_OK;
         }
         if (event == SR_EV_ABORT) {
@@ -164,6 +192,7 @@ int routes_on_change(sr_session_ctx_t *sess, sr_event_t event, uint32_t op_id)
     if (event != SR_EV_CHANGE && event != SR_EV_ENABLED)
         return SR_ERR_OK;
 
+    slot = -1;
     want = malloc(sizeof(*want));
     snap = malloc(sizeof(*snap));
     if (!want || !snap) {
@@ -173,14 +202,19 @@ int routes_on_change(sr_session_ctx_t *sess, sr_event_t event, uint32_t op_id)
     logf_("routes op %u: %s", op_id, event == SR_EV_ENABLED ? "start, applying running" : "change");
     if ((rc = read_wanted(sess, want, err, sizeof(err))) != SR_ERR_OK)
         goto end;
+    if (event == SR_EV_CHANGE && (slot = pending_new(op_id)) < 0) {
+        snprintf(err, sizeof(err), "too many open changes (%d)", MAX_PENDING);
+        sr_session_set_netconf_error(sess, "application", "resource-denied", NULL, NULL, err, 0);
+        rc = SR_ERR_OPERATION_FAILED;
+        goto end;
+    }
     switch (lsw_rtxn_apply(&r.txn, want, snap, err, sizeof(err))) {
     case LSW_TXN_OK:
         set_health(0, NULL);
-        if (event == SR_EV_CHANGE) {
-            if ((slot = pending_slot(op_id, 1)) >= 0)
-                *r.pending[slot].snap = *snap;
-            else
-                logf_("routes op %u: too many open changes, an ABORT could not be undone", op_id);
+        if (slot >= 0) {
+            *r.pending[slot].snap = *snap;
+            *r.pending[slot].want = *want;
+            slot = -1;
         }
         break;
     case LSW_TXN_FAILED:
@@ -195,6 +229,8 @@ int routes_on_change(sr_session_ctx_t *sess, sr_event_t event, uint32_t op_id)
         break;
     }
 end:
+    if (slot >= 0)
+        r.pending[slot].used = 0;
     logf_("routes op %u: %s", op_id, rc == SR_ERR_OK ? "ok" : err);
     if (event == SR_EV_ENABLED && rc != SR_ERR_OK) {
         set_health(1, err);
@@ -206,19 +242,44 @@ end:
     return rc;
 }
 
-void routes_reconcile(sr_session_ctx_t *sess)
+int routes_read_running(sr_session_ctx_t *sess, struct lsw_routes *want, char *err, size_t len)
 {
-    struct lsw_routes *want = malloc(sizeof(*want)), *now = malloc(sizeof(*now)), *snap = malloc(sizeof(*snap));
+    return read_wanted(sess, want, err, len) == SR_ERR_OK ? 0 : -1;
+}
+
+void routes_reconcile_failed(const char *err)
+{
+    set_health(1, err);
+    logf_("routes reconcile: %s", err);
+}
+
+int routes_pending(void)
+{
+    time_t now = time(NULL);
+    int any = 0;
+
+    for (int i = 0; i < MAX_PENDING; i++) {
+        if (!r.pending[i].used)
+            continue;
+        if (now - r.pending[i].since > PENDING_MAX_AGE) {
+            logf_("routes op %u: no DONE or ABORT after %d s, forgetting it", r.pending[i].op_id, PENDING_MAX_AGE);
+            r.pending[i].used = 0;
+        } else {
+            any = 1;
+        }
+    }
+    return any;
+}
+
+void routes_reconcile_locked(const struct lsw_routes *want)
+{
+    struct lsw_routes *now = malloc(sizeof(*now)), *snap = malloc(sizeof(*snap));
     char err[1024], why[160];
 
-    if (!want || !now || !snap)
+    if (!now || !snap)
         goto end;
-    for (int i = 0; i < MAX_PENDING; i++)
-        if (r.pending[i].used)
-            goto end;
-    if (read_wanted(sess, want, err, sizeof(err)) != SR_ERR_OK || r.txn.a->read(r.txn.a, now, err, sizeof(err))) {
-        set_health(1, err);
-        logf_("routes reconcile: %s", err);
+    if (r.txn.a->read(r.txn.a, now, err, sizeof(err))) {
+        routes_reconcile_failed(err);
         goto end;
     }
     if (!lsw_routes_diff(now, want, why, sizeof(why)))
@@ -231,11 +292,9 @@ void routes_reconcile(sr_session_ctx_t *sess)
         set_health(0, NULL);
         logf_("routes reconcile: ok");
     } else {
-        set_health(1, err);
-        logf_("routes reconcile: %s", err);
+        routes_reconcile_failed(err);
     }
 end:
-    free(want);
     free(now);
     free(snap);
 }

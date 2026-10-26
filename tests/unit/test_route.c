@@ -143,6 +143,30 @@ static void test_parse_bad(void **st)
                                    "\"gateway\":\"198.51.100.1\",\"interface\":\"eth0\"}]}}]}]}}]}}}",
                                    &r, err, sizeof(err)), -1);
     assert_string_equal(err, "route 192.0.2.0/24: next hop interface eth0 is not supported");
+    /* fail closed: a shape we do not know is not "no routes" */
+    assert_int_equal(lsw_frr_parse("{}", &r, err, sizeof(err)), -1);
+    assert_string_equal(err, "FRR output has no frr-routing:routing/control-plane-protocols/control-plane-protocol");
+    assert_int_equal(lsw_frr_parse("{\"frr-routing:routing\":{\"control-plane-protocols\":{\"control-plane-protocol\":[]}}}",
+                                   &r, err, sizeof(err)), -1);
+    assert_string_equal(err, "FRR output has no staticd in VRF default (is staticd running?)");
+    assert_int_equal(lsw_frr_parse("{\"frr-routing:routing\":{\"control-plane-protocols\":{\"control-plane-protocol\":{}}}}",
+                                   &r, err, sizeof(err)), -1);
+#define ONE(path_extra, nh_extra)                                                                                   \
+    "{\"frr-routing:routing\":{\"control-plane-protocols\":{\"control-plane-protocol\":[{"                            \
+    "\"type\":\"frr-staticd:staticd\",\"vrf\":\"default\",\"frr-staticd:staticd\":{\"route-list\":[{"                  \
+    "\"prefix\":\"192.0.2.0/24\",\"afi-safi\":\"frr-routing:ipv4-unicast\",\"path-list\":[{"                          \
+    "\"table-id\":0,\"distance\":1" path_extra ",\"frr-nexthops\":{\"nexthop\":[{\"nh-type\":\"blackhole\"" nh_extra \
+    "}]}}]}]}}]}}}"
+    assert_int_equal(lsw_frr_parse(ONE("", ",\"bh-type\":\"unspec\""), &r, err, sizeof(err)), 0);
+    assert_int_equal(r.n, 1);
+    assert_int_equal(lsw_frr_parse(ONE(",\"tag\":7", ""), &r, err, sizeof(err)), -1);
+    assert_string_equal(err, "route 192.0.2.0/24: unknown attribute tag");
+    assert_int_equal(lsw_frr_parse(ONE("", ",\"bh-type\":\"reject\""), &r, err, sizeof(err)), -1);
+    assert_string_equal(err, "route 192.0.2.0/24: blackhole type reject is not supported");
+    assert_int_equal(lsw_frr_parse(ONE("", ",\"vrf\":\"red\""), &r, err, sizeof(err)), -1);
+    assert_string_equal(err, "route 192.0.2.0/24: next hop in VRF red is not supported");
+    assert_int_equal(lsw_frr_parse(ONE("", ",\"onlink\":true"), &r, err, sizeof(err)), -1);
+    assert_string_equal(err, "route 192.0.2.0/24: unknown next hop attribute onlink");
 }
 
 /* rtxn on the mock: fail at each command of a gateway change; the routes come back */

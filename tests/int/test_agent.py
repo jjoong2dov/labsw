@@ -156,7 +156,7 @@ def test_abort_from_other_subscriber_restores_device(lab, agent_prio):
     # applied in CHANGE (3 commands), undone on ABORT (3 commands)
     assert "aborted by another subscriber, restoring" in log, log
     assert len(lab.trace_lines()) == 6
-    assert ("taking the only open one" in log) == (agent_prio == 0)
+    assert ("ABORT names no open change; the only open one is op" in log) == (agent_prio == 0)
 
 
 def test_two_sessions_edit_at_once(lab):
@@ -183,7 +183,7 @@ def test_two_sessions_edit_at_once(lab):
     dev = lab.ports()
     assert dev["p1"] == {v: (False, False) for v in range(100, 120)}
     assert dev["p2"] == {v: (False, False) for v in range(200, 220)}
-    assert "no such change" not in lab.log("labswd")
+    assert "ABORT names no open change" not in lab.log("labswd")
 
 
 def test_start_applies_running_and_fixes_drift(lab):

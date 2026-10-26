@@ -16,10 +16,16 @@
  * puts back what someone changed outside NETCONF (policy: NETCONF wins). It
  * skips a round while a change is between CHANGE and DONE/ABORT.
  *
+ * What this is not: a transaction across the bridge and FRR. A change is applied
+ * module by module during CHANGE and undone on failure or ABORT as well as the
+ * agent can (best effort); in between, one may have the new state and the other
+ * the old one. If the agent dies, the next start or reconcile round fixes it.
+ *
  * SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include <getopt.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -37,6 +43,7 @@
 
 #define MODULE "labsw-switch"
 #define MAX_PENDING 8
+#define PENDING_MAX_AGE 60 /* s: a change with no DONE/ABORT after this is dropped */
 
 static struct {
     struct lsw_adapter *a;
@@ -50,8 +57,11 @@ static struct {
     struct {
         int used;
         uint32_t op_id;
-        struct lsw_state snap;
+        time_t since;
+        struct lsw_state snap; /* before the change: what ABORT restores */
+        struct lsw_state want; /* what the change applied */
     } pending[MAX_PENDING];
+    atomic_uint callbacks; /* bumped when a change callback starts; reconcile checks it */
 } g = {.lock = PTHREAD_MUTEX_INITIALIZER, .txn_lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void log_line(const char *msg)
@@ -156,34 +166,69 @@ end:
     return rc;
 }
 
-static int pending_slot(uint32_t op_id, int create)
+/* open change by operation id, or -1 */
+static int pending_find(uint32_t op_id)
 {
-    int free_slot = -1, used = 0, last = -1;
-    for (int i = 0; i < MAX_PENDING; i++) {
+    for (int i = 0; i < MAX_PENDING; i++)
         if (g.pending[i].used && g.pending[i].op_id == op_id)
             return i;
-        if (g.pending[i].used) {
-            used++;
-            last = i;
-        } else if (free_slot < 0) {
-            free_slot = i;
+    return -1;
+}
+
+/* the only open change, or -1 if there are none or several */
+static int pending_only(void)
+{
+    int found = -1;
+    for (int i = 0; i < MAX_PENDING; i++) {
+        if (!g.pending[i].used)
+            continue;
+        if (found >= 0)
+            return -1;
+        found = i;
+    }
+    return found;
+}
+
+/* reserve a slot before touching the device; -1 if all are taken */
+static int pending_new(uint32_t op_id)
+{
+    for (int i = 0; i < MAX_PENDING; i++) {
+        if (!g.pending[i].used) {
+            g.pending[i].used = 1;
+            g.pending[i].op_id = op_id;
+            g.pending[i].since = time(NULL);
+            return i;
         }
     }
-    if (!create) {
-        /* sysrepo 5.1.0 passes the request id, not the operation id, to an ABORT it
-         * makes itself (a subscriber of the same priority failed; shm_sub.c). Changes
-         * of one module are serialized, so a single open change is the one aborted. */
-        if (used == 1 && op_id != g.pending[last].op_id) {
-            logf_("op %u: no such change, taking the only open one (op %u)", op_id, g.pending[last].op_id);
-            return last;
-        }
+    return -1;
+}
+
+/*
+ * sysrepo 5.1.0 passes the request id, not the operation id, to an ABORT it
+ * makes itself (a subscriber of the same priority failed; shm_sub.c). Then the
+ * ABORT names no open change. Take the only open change, but only if the device
+ * still has exactly what that change applied; otherwise say we do not know.
+ */
+static int pending_for_abort(uint32_t op_id)
+{
+    struct lsw_state dev;
+    char err[256], why[160];
+    int i = pending_find(op_id);
+
+    if (i >= 0 || (i = pending_only()) < 0)
+        return i;
+    if (lsw_state_init(&dev))
         return -1;
+    if (g.a->read(g.a, &dev, err, sizeof(err)) || lsw_state_diff(&dev, &g.pending[i].want, why, sizeof(why))) {
+        logf_("op %u: ABORT names no open change, and the device is not what op %u applied", op_id,
+              g.pending[i].op_id);
+        i = -1;
+    } else {
+        logf_("op %u: ABORT names no open change; the only open one is op %u and the device has what it "
+              "applied, restoring that", op_id, g.pending[i].op_id);
     }
-    if (free_slot < 0)
-        return -1;
-    g.pending[free_slot].used = 1;
-    g.pending[free_slot].op_id = op_id;
-    return free_slot;
+    lsw_state_free(&dev);
+    return i;
 }
 
 static int on_change_locked(sr_session_ctx_t *sess, sr_event_t event, uint32_t op_id)
@@ -193,11 +238,14 @@ static int on_change_locked(sr_session_ctx_t *sess, sr_event_t event, uint32_t o
     int rc = SR_ERR_OK, slot;
 
     if (event == SR_EV_DONE || event == SR_EV_ABORT) {
-        slot = pending_slot(op_id, 0);
+        /* a DONE that names no open change (e.g. the one after ENABLED) is ignored:
+         * forgetting the wrong snapshot would be worse than keeping it until it expires */
+        slot = event == SR_EV_ABORT ? pending_for_abort(op_id) : pending_find(op_id);
         if (slot < 0) {
-            /* e.g. the DONE that follows ENABLED; an ABORT here means we lost a snapshot */
-            if (event == SR_EV_ABORT)
-                logf_("op %u: ABORT for a change we do not know", op_id);
+            if (event == SR_EV_ABORT) {
+                logf_("op %u: ABORT for a change we do not know; reconcile decides", op_id);
+                set_health(1, "an ABORT could not be matched to a change");
+            }
             return SR_ERR_OK;
         }
         if (event == SR_EV_ABORT) {
@@ -217,6 +265,7 @@ static int on_change_locked(sr_session_ctx_t *sess, sr_event_t event, uint32_t o
 
     if (lsw_state_init(&want) || lsw_state_init(&snap))
         return SR_ERR_NO_MEMORY;
+    slot = -1;
     logf_("op %u: %s", op_id, event == SR_EV_ENABLED ? "start, applying running" : "change");
     if (read_wanted(sess, &want, err, sizeof(err))) {
         sr_session_set_netconf_error(sess, "application", "operation-failed", NULL, NULL, err, 0);
@@ -225,15 +274,20 @@ static int on_change_locked(sr_session_ctx_t *sess, sr_event_t event, uint32_t o
     }
     if ((rc = validate(sess, &want, err, sizeof(err))) != SR_ERR_OK)
         goto end;
+    /* the slot for a later ABORT is taken before the device is touched */
+    if (event == SR_EV_CHANGE && (slot = pending_new(op_id)) < 0) {
+        snprintf(err, sizeof(err), "too many open changes (%d)", MAX_PENDING);
+        sr_session_set_netconf_error(sess, "application", "resource-denied", NULL, NULL, err, 0);
+        rc = SR_ERR_OPERATION_FAILED;
+        goto end;
+    }
     switch (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err))) {
     case LSW_TXN_OK:
         set_health(0, NULL);
-        if (event == SR_EV_CHANGE) {
-            slot = pending_slot(op_id, 1);
-            if (slot >= 0)
-                lsw_state_copy(&g.pending[slot].snap, &snap);
-            else
-                logf_("op %u: too many open changes, an ABORT could not be undone", op_id);
+        if (slot >= 0) {
+            lsw_state_copy(&g.pending[slot].snap, &snap);
+            lsw_state_copy(&g.pending[slot].want, &want);
+            slot = -1; /* kept until DONE or ABORT */
         }
         break;
     case LSW_TXN_FAILED:
@@ -248,6 +302,8 @@ static int on_change_locked(sr_session_ctx_t *sess, sr_event_t event, uint32_t o
         break;
     }
 end:
+    if (slot >= 0)
+        g.pending[slot].used = 0; /* failed: nothing to keep */
     logf_("op %u: %s", op_id, rc == SR_ERR_OK ? "ok" : err);
     if (event == SR_EV_ENABLED && rc != SR_ERR_OK) {
         /* failing here would stop the agent, and with no subscriber sysrepo takes every
@@ -267,47 +323,78 @@ static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module
     int rc;
     (void)sub_id; (void)module; (void)xpath; (void)priv;
 
+    atomic_fetch_add(&g.callbacks, 1);
     pthread_mutex_lock(&g.txn_lock);
     rc = on_change_locked(sess, event, op_id);
     pthread_mutex_unlock(&g.txn_lock);
     return rc;
 }
 
-/* make the device equal to running again if something else changed it */
-static void reconcile(sr_session_ctx_t *sess)
+/* drop open changes that never got DONE/ABORT; the caller holds txn_lock */
+static void pending_expire(void)
+{
+    time_t now = time(NULL);
+    for (int i = 0; i < MAX_PENDING; i++) {
+        if (g.pending[i].used && now - g.pending[i].since > PENDING_MAX_AGE) {
+            logf_("op %u: no DONE or ABORT after %d s, forgetting it", g.pending[i].op_id, PENDING_MAX_AGE);
+            g.pending[i].used = 0;
+        }
+    }
+}
+
+static int pending_any(void)
+{
+    for (int i = 0; i < MAX_PENDING; i++)
+        if (g.pending[i].used)
+            return 1;
+    return 0;
+}
+
+/*
+ * Make the device equal to running again if something else changed it.
+ * Running is read before txn_lock is taken: a change callback runs while sysrepo
+ * holds its own locks and then waits for txn_lock, so calling sysrepo with
+ * txn_lock held could deadlock. If a callback started meanwhile, skip the round.
+ */
+static void reconcile(sr_session_ctx_t *sess, struct lsw_routes *rwant)
 {
     struct lsw_state want, dev, snap;
-    char err[1024], why[160];
+    char err[1024], rerr[1024], why[160];
+    unsigned start = atomic_load(&g.callbacks);
+    int sw_ok, rt_ok = 0;
 
     if (lsw_state_init(&want) || lsw_state_init(&dev) || lsw_state_init(&snap))
         goto end;
+    sw_ok = read_wanted(sess, &want, err, sizeof(err)) == 0;
+    if (rwant)
+        rt_ok = routes_read_running(sess, rwant, rerr, sizeof(rerr)) == 0;
     pthread_mutex_lock(&g.txn_lock);
-    for (int i = 0; i < MAX_PENDING; i++)
-        if (g.pending[i].used)
-            goto unlock; /* a change is open; its DONE or ABORT decides */
-    if (read_wanted(sess, &want, err, sizeof(err)) || g.a->read(g.a, &dev, err, sizeof(err))) {
+    pending_expire();
+    if (atomic_load(&g.callbacks) != start || pending_any() || (rwant && routes_pending()))
+        goto unlock; /* a change is running or open; its DONE or ABORT decides */
+    if (rwant) {
+        if (rt_ok)
+            routes_reconcile_locked(rwant);
+        else
+            routes_reconcile_failed(rerr);
+    }
+    if (!sw_ok || g.a->read(g.a, &dev, err, sizeof(err))) {
+        set_health(1, err);
         logf_("reconcile: %s", err);
         goto unlock;
     }
     if (!lsw_state_diff(&dev, &want, why, sizeof(why)))
         goto unlock;
     logf_("reconcile: device differs from running (%s), applying running", why);
-    switch (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err))) {
-    case LSW_TXN_OK:
+    if (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err)) == LSW_TXN_OK) {
         pthread_mutex_lock(&g.lock);
         g.repairs++;
         pthread_mutex_unlock(&g.lock);
         set_health(0, NULL);
         logf_("reconcile: ok");
-        break;
-    case LSW_TXN_FAILED:
+    } else {
         set_health(1, err); /* the device still differs from running */
         logf_("reconcile: %s", err);
-        break;
-    case LSW_TXN_FAILED_DEGRADED:
-        set_health(1, err);
-        logf_("reconcile: %s", err);
-        break;
     }
 unlock:
     pthread_mutex_unlock(&g.txn_lock);
@@ -323,6 +410,7 @@ static int on_route_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *
     int rc;
     (void)sub_id; (void)module; (void)xpath; (void)priv;
 
+    atomic_fetch_add(&g.callbacks, 1);
     pthread_mutex_lock(&g.txn_lock);
     rc = routes_on_change(sess, event, op_id);
     pthread_mutex_unlock(&g.txn_lock);
@@ -400,7 +488,7 @@ end:
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: labswd [-b bridge] [-f /path/to/vtysh [-N frr-instance]] [-P priority] [-R seconds] [-v]\n"
+    fprintf(stderr, "usage: labswd [-b bridge] [-f /path/to/vtysh [-N frr-instance]] [-P priority] [-R seconds] [-D ms] [-v]\n"
 #ifdef LSW_TESTING
                     "       labswd -a mock -m state.json [-r routes.json] [-t trace.txt] [-F n] [-G n]   (test build)\n"
 #endif
@@ -414,21 +502,23 @@ int main(int argc, char **argv)
     const char *adapter = "bridge", *mock_state = NULL, *trace = NULL, *mock_routes = NULL;
 #endif
     struct lsw_route_adapter *ra = NULL;
+    struct lsw_routes *rwant = NULL;
     int route_fail_at = 0;
     sr_conn_ctx_t *conn = NULL;
     sr_session_ctx_t *sess = NULL;
     sr_subscription_ctx_t *sub = NULL;
     sigset_t sigs;
     uint32_t prio = 0;
-    int opt, rc = 1, sig, every = 0;
+    int opt, rc = 1, sig, every = 0, deadline = 3000;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    while ((opt = getopt(argc, argv, "b:f:N:P:R:a:m:r:t:F:G:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "b:f:N:P:R:D:a:m:r:t:F:G:vh")) != -1) {
         switch (opt) {
         case 'b': bridge = optarg; break;
         case 'v': g.verbose = 1; break;
         case 'P': prio = (uint32_t)strtoul(optarg, NULL, 10); break;
         case 'R': every = atoi(optarg); break;
+        case 'D': deadline = atoi(optarg); break;
         case 'f': vtysh = optarg; break;
         case 'N': frr_ns = optarg; break;
 #ifdef LSW_TESTING
@@ -461,12 +551,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "labswd: -f needs an absolute path to vtysh\n");
         return 2;
     }
-    if (ra && routes_init(ra, route_fail_at, log_line))
+    if (ra && (routes_init(ra, route_fail_at, deadline, log_line) || !(rwant = malloc(sizeof(*rwant)))))
         return 1;
     for (int i = 0; i < MAX_PENDING; i++)
-        if (lsw_state_init(&g.pending[i].snap))
+        if (lsw_state_init(&g.pending[i].snap) || lsw_state_init(&g.pending[i].want))
             return 1;
     g.txn.a = g.a;
+    g.txn.deadline_ms = deadline; /* below sysrepo's 5 s callback timeout */
     g.txn.log = log_line;
 
     /* signals are taken by sigwait() below, not by a handler */
@@ -500,14 +591,8 @@ int main(int argc, char **argv)
         sig = every > 0 ? sigtimedwait(&sigs, NULL, &ts) : sigwaitinfo(&sigs, NULL);
         if (sig > 0)
             break;
-        if (every > 0) { /* timeout (or EINTR): one round */
-            reconcile(sess);
-            if (ra) {
-                pthread_mutex_lock(&g.txn_lock);
-                routes_reconcile(sess);
-                pthread_mutex_unlock(&g.txn_lock);
-            }
-        }
+        if (every > 0) /* timeout (or EINTR): one round */
+            reconcile(sess, rwant);
     }
     logf_("signal %d, stopping", sig);
     rc = 0;
@@ -516,7 +601,10 @@ end:
     sr_disconnect(conn);
     g.a->destroy(g.a);
     routes_cleanup();
-    for (int i = 0; i < MAX_PENDING; i++)
+    for (int i = 0; i < MAX_PENDING; i++) {
         lsw_state_free(&g.pending[i].snap);
+        lsw_state_free(&g.pending[i].want);
+    }
+    free(rwant);
     return rc ? 1 : 0;
 }

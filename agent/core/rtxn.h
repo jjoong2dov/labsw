@@ -13,6 +13,8 @@ struct lsw_rtxn {
     int fail_at;   /* tests: make the n-th route command of an apply fail (0 = off) */
     int cmd_count;
     int restoring;
+    int deadline_ms; /* an apply that runs longer stops and is undone (0 = no limit) */
+    long long started_ms;
     void (*log)(const char *msg);
 };
 

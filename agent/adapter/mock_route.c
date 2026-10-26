@@ -1,7 +1,8 @@
 /* mock_route.c - static routes kept in a JSON file, for tests without FRR
  *   {"routes": {"192.0.2.0/24": ["198.51.100.1"], "203.0.113.0/24": ["blackhole"]}}
  * Like FRR, a prefix can have several next hops (add a second gateway, and the
- * first one stays); read() refuses those, as the FRR adapter does.
+ * first one stays); read() refuses those, as the FRR adapter does. Deleting a
+ * route that is not there "succeeds", as vtysh does (exit code 0).
  * SPDX-License-Identifier: MIT */
 #ifdef LSW_TESTING
 
@@ -77,7 +78,12 @@ static int change(struct lsw_route_adapter *a, const struct lsw_route *r, int de
             at = (int)i;
     if (del) {
         if (at < 0) {
-            snprintf(err, len, "mock: no route %s %s", r->prefix, gw);
+            /* like FRR 10.3: "% Refusing to remove a non-existent route", exit code 0 */
+            if (m->trace_file && (f = fopen(m->trace_file, "a"))) {
+                fprintf(f, "del route %s %s (not there)\n", r->prefix, gw);
+                fclose(f);
+            }
+            rc = 0;
             goto end;
         }
         json_object_array_del_idx(nhs, (size_t)at, 1);

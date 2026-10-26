@@ -26,7 +26,10 @@ static int run_step(struct lsw_rtxn *t, const struct lsw_route_step *s, char *er
     int rc;
 
     lsw_route_step_text(s, txt, sizeof(txt));
-    if (!t->restoring && t->fail_at && ++t->cmd_count == t->fail_at) {
+    if (!t->restoring && t->deadline_ms && lsw_now_ms() - t->started_ms > t->deadline_ms) {
+        snprintf(err, len, "apply took longer than %d ms, stopped before %s", t->deadline_ms, txt);
+        rc = -1;
+    } else if (!t->restoring && t->fail_at && ++t->cmd_count == t->fail_at) {
         snprintf(err, len, "injected failure at command %d (%s)", t->fail_at, txt);
         rc = -1;
     } else {
@@ -36,12 +39,13 @@ static int run_step(struct lsw_rtxn *t, const struct lsw_route_step *s, char *er
     return rc;
 }
 
-/* plan from what FRR has to target and run it; *done = steps that succeeded */
-static int converge(struct lsw_rtxn *t, const struct lsw_routes *target, struct lsw_routes *now,
+/* plan from what FRR has (now; read here unless known) to target and run it;
+ * *done = steps that succeeded */
+static int converge(struct lsw_rtxn *t, const struct lsw_routes *target, struct lsw_routes *now, int known,
                     struct lsw_route_plan *plan, int *done, char *err, size_t len)
 {
     *done = 0;
-    if (t->a->read(t->a, now, err, len))
+    if (!known && t->a->read(t->a, now, err, len))
         return -1;
     lsw_route_plan(now, target, plan);
     for (int i = 0; i < plan->n; i++, (*done)++)
@@ -88,7 +92,7 @@ int lsw_rtxn_restore(struct lsw_rtxn *t, const struct lsw_routes *snap, char *er
 
     if (now && plan) {
         t->restoring = 1;
-        rc = converge(t, snap, now, plan, &done, err, errlen);
+        rc = converge(t, snap, now, 0, plan, &done, err, errlen);
         t->restoring = 0;
         if (!rc)
             rc = verify(t, snap, now, err, errlen);
@@ -113,9 +117,11 @@ enum lsw_txn_result lsw_rtxn_apply(struct lsw_rtxn *t, const struct lsw_routes *
         goto end;
     }
     t->cmd_count = 0;
+    t->started_ms = lsw_now_ms();
     if (t->a->read(t->a, snapshot, err, errlen))
         goto end; /* nothing was changed */
-    if (converge(t, want, now, plan, &done, err, errlen) == 0 && t->a->read(t->a, now, err, errlen) == 0) {
+    *now = *snapshot;
+    if (converge(t, want, now, 1, plan, &done, err, errlen) == 0 && t->a->read(t->a, now, err, errlen) == 0) {
         if (!lsw_routes_diff(now, want, why, sizeof(why))) {
             res = LSW_TXN_OK;
             goto end;

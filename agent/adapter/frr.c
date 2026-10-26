@@ -12,7 +12,7 @@
 #include "exec.h"
 #include "route_adapter.h"
 
-#define TIMEOUT_MS 10000
+#define TIMEOUT_MS 2000 /* one vtysh; an apply as a whole has the deadline in rtxn */
 
 struct frr {
     char vtysh[128];

@@ -17,8 +17,13 @@ struct lsw_txn {
     int fail_at;    /* tests: make the n-th device command of an apply fail (0 = off) */
     int cmd_count;  /* device commands in the current apply */
     int restoring;  /* commands of a restore are never made to fail */
+    int deadline_ms; /* an apply that runs longer stops and is undone (0 = no limit) */
+    long long started_ms;
     void (*log)(const char *msg);
 };
+
+/* CLOCK_MONOTONIC in ms */
+long long lsw_now_ms(void);
 
 /*
  * Make the device equal to want. The state read before the first command is
