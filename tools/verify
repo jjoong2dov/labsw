@@ -88,6 +88,11 @@ def run_remote(args, out):
     sh(scp + ["-q"] + [str(p) for p in sorted((REPO / "yang").glob("*.yang"))] + [f"{host}:{rdir}/yang/"])
     sh(scp + ["-q", str(build / "labswd"), str(build / "reject_sub"), f"{host}:{rdir}/build/"])
     k = f" -k {shlex.quote(args.k)}" if args.k else ""
+    # the route tests use the device's one FRR: an installed labswd service would
+    # fight them over it (it puts its running routes back every few seconds)
+    svc = subprocess.run(ssh + ["systemctl is-active labswd.service"], capture_output=True, text=True).stdout.strip()
+    if svc == "active":
+        sh(ssh + ["sudo systemctl stop labswd.service"])
     remote = (f"cd {rdir}/tests/int && sudo env LABSW_TARGET=bridge LABSW_PREFIX={args.prefix} "
               f"LABSW_BUILD=$HOME/{rdir}/build LABSW_NC_KEY=$HOME/{rdir}/keys/nc_test "
               f"python3 -m pytest -q -p no:cacheprovider -rfEs --junitxml=$HOME/{rdir}/junit.xml{k}; "
@@ -96,10 +101,13 @@ def run_remote(args, out):
     with open(out / "console.log", "w") as log:
         subprocess.run(ssh + [remote], stdout=log, stderr=subprocess.STDOUT)
     secs = time.monotonic() - t0
+    if svc == "active":
+        sh(ssh + ["sudo systemctl start labswd.service"])
     sh(scp + ["-q", f"{host}:{rdir}/junit.xml", str(out / "junit.xml")])
     ver = subprocess.run(ssh + [f"uname -srm; {args.prefix}/sbin/netopeer2-server -V; "
                                 "sudo /usr/bin/vtysh -c 'show version' | head -1"], capture_output=True, text=True)
     return {"command": remote, "seconds": round(secs, 1), **junit_counts(out / "junit.xml"),
+            "labswd_service": "stopped during the tests" if svc == "active" else svc,
             "versions": ver.stdout.strip().splitlines()}
 
 

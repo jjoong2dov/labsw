@@ -3,6 +3,9 @@
   LABSW_TARGET=bridge  a real Linux bridge in its own network namespace; root
 Every test gets its own repository, SHM prefix, port and (bridge) namespaces, so
 the tests do not touch a labswd or netopeer2 already running on the machine.
+Not FRR: with LABSW_TARGET=bridge the route tests use the one FRR of the machine
+(tests run one after another, all static routes are removed before and after
+each test), and no other labswd may manage it meanwhile.
 
 Needs the stack of the same versions (LABSW_PREFIX, default ~/opt/labsw-host),
 a test build of labsw (LABSW_BUILD, default <repo>/build) and an SSH key pair
@@ -142,6 +145,10 @@ class BridgeDevice:
 
     def setup(self, ports):
         self.ports_ = list(ports)
+        other = subprocess.run(["pgrep", "-af", "labswd .*-f"], capture_output=True, text=True).stdout.strip()
+        if other:
+            raise RuntimeError("another labswd manages this FRR; stop it first "
+                               f"(systemctl stop labswd):\n{other}")
         self.set_routes({})
         subprocess.run(["ip", "netns", "add", self.ns], check=True)
         # vlan_default_pvid 0: a new port has no VLAN at all, like an unlisted port in the model
