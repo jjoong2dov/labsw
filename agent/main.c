@@ -1,7 +1,8 @@
 /* main.c - labswd: keeps a Linux bridge equal to /labsw-switch:switch in running
  *
  * sysrepo events (module change subscription with SR_SUBSCR_ENABLED):
- *   ENABLED  agent start: apply what running already has
+ *   ENABLED  agent start: apply what running already has (if that fails, keep
+ *            running with health degraded; the next successful change fixes it)
  *   CHANGE   validate, apply to the device, read back; on any failure restore
  *            the device here (a failing subscriber gets no ABORT) and reject
  *   ABORT    another subscriber rejected the change after we applied it: restore
@@ -117,15 +118,15 @@ end:
 }
 
 /* device facts YANG cannot check: every configured port must exist on the bridge */
-static int validate(sr_session_ctx_t *sess, const struct lsw_state *want)
+static int validate(sr_session_ctx_t *sess, const struct lsw_state *want, char *err, size_t len)
 {
     struct lsw_state dev;
-    char err[256], path[128];
+    char path[128];
     int rc = SR_ERR_OK;
 
     if (lsw_state_init(&dev))
         return SR_ERR_NO_MEMORY;
-    if (g.a->read(g.a, &dev, err, sizeof(err))) {
+    if (g.a->read(g.a, &dev, err, len)) {
         sr_session_set_netconf_error(sess, "application", "operation-failed", NULL, NULL, err, 0);
         rc = SR_ERR_OPERATION_FAILED;
         goto end;
@@ -135,7 +136,7 @@ static int validate(sr_session_ctx_t *sess, const struct lsw_state *want)
             continue;
         /* the name matched the YANG pattern, so it cannot contain a quote */
         snprintf(path, sizeof(path), "/%s:switch/port[name='%s']", MODULE, want->port[i].name);
-        snprintf(err, sizeof(err), "Port \"%s\" is not a port of the bridge.", want->port[i].name);
+        snprintf(err, len, "Port \"%s\" is not a port of the bridge.", want->port[i].name);
         sr_session_set_netconf_error(sess, "application", "invalid-value", NULL, path, err, 0);
         rc = SR_ERR_VALIDATION_FAILED;
         break;
@@ -147,14 +148,28 @@ end:
 
 static int pending_slot(uint32_t op_id, int create)
 {
-    int free_slot = -1;
+    int free_slot = -1, used = 0, last = -1;
     for (int i = 0; i < MAX_PENDING; i++) {
         if (g.pending[i].used && g.pending[i].op_id == op_id)
             return i;
-        if (!g.pending[i].used && free_slot < 0)
+        if (g.pending[i].used) {
+            used++;
+            last = i;
+        } else if (free_slot < 0) {
             free_slot = i;
+        }
     }
-    if (!create || free_slot < 0)
+    if (!create) {
+        /* sysrepo 5.1.0 passes the request id, not the operation id, to an ABORT it
+         * makes itself (a subscriber of the same priority failed; shm_sub.c). Changes
+         * of one module are serialized, so a single open change is the one aborted. */
+        if (used == 1 && op_id != g.pending[last].op_id) {
+            logf_("op %u: no such change, taking the only open one (op %u)", op_id, g.pending[last].op_id);
+            return last;
+        }
+        return -1;
+    }
+    if (free_slot < 0)
         return -1;
     g.pending[free_slot].used = 1;
     g.pending[free_slot].op_id = op_id;
@@ -165,14 +180,18 @@ static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module
                      sr_event_t event, uint32_t op_id, void *priv)
 {
     struct lsw_state want, snap;
-    char err[1024];
+    char err[1024] = "";
     int rc = SR_ERR_OK, slot;
     (void)sub_id; (void)module; (void)xpath; (void)priv;
 
     if (event == SR_EV_DONE || event == SR_EV_ABORT) {
         slot = pending_slot(op_id, 0);
-        if (slot < 0)
-            return SR_ERR_OK; /* e.g. the DONE that follows ENABLED */
+        if (slot < 0) {
+            /* e.g. the DONE that follows ENABLED; an ABORT here means we lost a snapshot */
+            if (event == SR_EV_ABORT)
+                logf_("op %u: ABORT for a change we do not know", op_id);
+            return SR_ERR_OK;
+        }
         if (event == SR_EV_ABORT) {
             logf_("op %u: aborted by another subscriber, restoring", op_id);
             if (lsw_txn_restore(&g.txn, &g.pending[slot].snap, err, sizeof(err))) {
@@ -196,7 +215,7 @@ static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module
         rc = SR_ERR_OPERATION_FAILED;
         goto end;
     }
-    if ((rc = validate(sess, &want)) != SR_ERR_OK)
+    if ((rc = validate(sess, &want, err, sizeof(err))) != SR_ERR_OK)
         goto end;
     switch (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err))) {
     case LSW_TXN_OK:
@@ -222,6 +241,13 @@ static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module
     }
 end:
     logf_("op %u: %s", op_id, rc == SR_ERR_OK ? "ok" : err);
+    if (event == SR_EV_ENABLED && rc != SR_ERR_OK) {
+        /* failing here would stop the agent, and with no subscriber sysrepo takes every
+         * edit without touching the device. Keep running, say so, reject changes. */
+        set_health(1, err);
+        logf_("op %u: running is NOT on the device; health degraded until a change succeeds", op_id);
+        rc = SR_ERR_OK;
+    }
     lsw_state_free(&want);
     lsw_state_free(&snap);
     return rc;
@@ -287,7 +313,7 @@ end:
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: labswd [-b bridge] [-v]\n"
+    fprintf(stderr, "usage: labswd [-b bridge] [-P priority] [-v]\n"
 #ifdef LSW_TESTING
                     "       labswd -a mock -m state.json [-t trace.txt] [-F n]   (test build)\n"
 #endif
@@ -301,13 +327,15 @@ int main(int argc, char **argv)
     sr_session_ctx_t *sess = NULL;
     sr_subscription_ctx_t *sub = NULL;
     sigset_t sigs;
+    uint32_t prio = 0;
     int opt, rc = 1, sig;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    while ((opt = getopt(argc, argv, "b:a:m:t:F:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "b:P:a:m:t:F:vh")) != -1) {
         switch (opt) {
         case 'b': bridge = optarg; break;
         case 'v': g.verbose = 1; break;
+        case 'P': prio = (uint32_t)strtoul(optarg, NULL, 10); break;
 #ifdef LSW_TESTING
         case 'a': adapter = optarg; break;
         case 'm': mock_state = optarg; break;
@@ -347,7 +375,7 @@ int main(int argc, char **argv)
         logf_("oper subscribe: %s", sr_strerror(rc));
         goto end;
     }
-    if ((rc = sr_module_change_subscribe(sess, MODULE, NULL, on_change, NULL, 0, SR_SUBSCR_ENABLED, &sub))) {
+    if ((rc = sr_module_change_subscribe(sess, MODULE, NULL, on_change, NULL, prio, SR_SUBSCR_ENABLED, &sub))) {
         logf_("change subscribe: %s (could not apply the running configuration)", sr_strerror(rc));
         goto end;
     }
