@@ -1,0 +1,32 @@
+cmake_minimum_required(VERSION 3.16)
+project(labsw C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+add_compile_options(-Wall -Wextra -Werror=implicit-function-declaration)
+
+option(LABSW_TESTING "Build the mock adapter, fault injection and unit tests" OFF)
+set(LABSW_BRIDGE_BIN "/usr/sbin/bridge" CACHE STRING "bridge (iproute2) used by the agent")
+set(LABSW_IP_BIN "/usr/sbin/ip" CACHE STRING "ip (iproute2) used by the agent")
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JSONC REQUIRED json-c)
+
+set(CORE_SRC agent/core/state.c agent/core/plan.c agent/core/txn.c)
+add_library(labsw_core STATIC ${CORE_SRC} agent/adapter/mock.c)
+target_include_directories(labsw_core PUBLIC ${JSONC_INCLUDE_DIRS})
+target_link_libraries(labsw_core PUBLIC ${JSONC_LINK_LIBRARIES})
+if(LABSW_TESTING)
+  target_compile_definitions(labsw_core PUBLIC LSW_TESTING)
+endif()
+
+if(LABSW_TESTING)
+  enable_testing()
+  pkg_check_modules(CMOCKA REQUIRED cmocka)
+  foreach(t plan mock txn)
+    add_executable(test_${t} tests/unit/test_${t}.c)
+    target_include_directories(test_${t} PRIVATE agent ${CMOCKA_INCLUDE_DIRS})
+    target_link_libraries(test_${t} labsw_core ${CMOCKA_LINK_LIBRARIES})
+    add_test(NAME unit_${t} COMMAND test_${t})
+  endforeach()
+endif()
