@@ -94,7 +94,8 @@ def test_route_drift_repaired(lab):
         redit(m, TWO)
         lab.dev.set_routes({"198.51.100.0/24": "203.0.113.99", "192.0.2.0/24": "blackhole"})
         wait_for(lambda: lab.dev.routes() == TWO_DEV, "the agent to repair the routes", timeout=30)
-        assert rstate(m, "repairs") == "1"
+        # the counter goes up after the agent has read FRR back, a moment after the change
+        wait_for(lambda: rstate(m, "repairs") == "1", "repairs = 1", timeout=10)
 
 
 def test_unsupported_route_outside_is_not_touched(lab):

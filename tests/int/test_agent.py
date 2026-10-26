@@ -220,7 +220,7 @@ def test_drift_is_repaired_while_running(lab):
         assert oper_leaf(m, "repairs") == "0"
         lab.dev.set_ports({"p1": {99: (True, True)}, "p3": {10: (False, False)}})
         wait_for(lambda: lab.ports() == ACCESS10_DEV, "the agent to repair the drift", timeout=30)
-        assert oper_leaf(m, "repairs") == "1"
+        wait_for(lambda: oper_leaf(m, "repairs") == "1", "repairs = 1", timeout=10)
         assert oper_leaf(m, "health") == "ok"
         n = len(lab.trace_lines())
         edit(m, ACCESS10)              # NETCONF still works and is a no-op
