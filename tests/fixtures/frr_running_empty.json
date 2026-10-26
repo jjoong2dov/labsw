@@ -1,0 +1,14 @@
+{
+  "frr-routing:routing": {
+    "control-plane-protocols": {
+      "control-plane-protocol": [
+        {
+          "type": "frr-staticd:staticd",
+          "name": "staticd",
+          "vrf": "default"
+        }
+      ]
+    }
+  }
+}
+

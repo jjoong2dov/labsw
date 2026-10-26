@@ -12,8 +12,9 @@ set(LABSW_IP_BIN "/usr/sbin/ip" CACHE STRING "ip (iproute2) used by the agent")
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(JSONC REQUIRED json-c)
 
-set(CORE_SRC agent/core/state.c agent/core/plan.c agent/core/txn.c
-    agent/adapter/exec.c agent/adapter/bridge.c agent/adapter/bridge_parse.c agent/adapter/mock.c)
+set(CORE_SRC agent/core/state.c agent/core/plan.c agent/core/txn.c agent/core/route.c agent/core/rtxn.c
+    agent/adapter/exec.c agent/adapter/bridge.c agent/adapter/bridge_parse.c agent/adapter/mock.c
+    agent/adapter/frr.c agent/adapter/frr_parse.c agent/adapter/mock_route.c)
 add_library(labsw_core STATIC ${CORE_SRC})
 target_compile_definitions(labsw_core PRIVATE LSW_BRIDGE_BIN="${LABSW_BRIDGE_BIN}" LSW_IP_BIN="${LABSW_IP_BIN}")
 target_include_directories(labsw_core PUBLIC ${JSONC_INCLUDE_DIRS})
@@ -24,7 +25,7 @@ endif()
 
 pkg_check_modules(SYSREPO REQUIRED sysrepo)
 pkg_check_modules(LIBYANG REQUIRED libyang)
-add_executable(labswd agent/main.c)
+add_executable(labswd agent/main.c agent/routes.c)
 target_include_directories(labswd PRIVATE agent ${SYSREPO_INCLUDE_DIRS} ${LIBYANG_INCLUDE_DIRS})
 target_link_libraries(labswd labsw_core ${SYSREPO_LINK_LIBRARIES} ${LIBYANG_LINK_LIBRARIES} pthread)
 install(TARGETS labswd DESTINATION sbin)
@@ -33,7 +34,7 @@ install(DIRECTORY yang/ DESTINATION share/yang/modules/labsw FILES_MATCHING PATT
 if(LABSW_TESTING)
   enable_testing()
   pkg_check_modules(CMOCKA REQUIRED cmocka)
-  foreach(t plan mock txn bridge_parse exec)
+  foreach(t plan mock txn bridge_parse exec route)
     add_executable(test_${t} tests/unit/test_${t}.c)
     target_include_directories(test_${t} PRIVATE agent ${CMOCKA_INCLUDE_DIRS})
     target_link_libraries(test_${t} labsw_core ${CMOCKA_LINK_LIBRARIES})

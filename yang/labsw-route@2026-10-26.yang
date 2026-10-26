@@ -1,0 +1,71 @@
+module labsw-route {
+  yang-version 1.1;
+  namespace "urn:example:labsw-route";
+  prefix lsr;
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  organization
+    "labsw (example code for the book)";
+  description
+    "IPv4 static routes, kept in FRR (staticd) by the agent.
+
+     The agent owns every IPv4 static route of the default VRF with
+     distance 1 and one next hop. It refuses to start changing routes
+     if FRR has a static route it cannot express (another VRF, another
+     distance, several next hops, an interface next hop).";
+
+  revision 2026-10-26 {
+    description
+      "Initial revision.";
+  }
+
+  container routes {
+    list route {
+      key "prefix";
+      leaf prefix {
+        type inet:ipv4-prefix;
+        description
+          "Destination. As in ietf-inet-types, host bits are set to
+           zero: 192.0.2.1/24 is stored as 192.0.2.0/24.";
+      }
+      choice next-hop {
+        mandatory true;
+        leaf gateway {
+          type inet:ipv4-address-no-zone;
+        }
+        leaf blackhole {
+          type empty;
+          description
+            "Drop packets to this prefix.";
+        }
+      }
+    }
+  }
+
+  container routes-state {
+    config false;
+    leaf health {
+      type enumeration {
+        enum ok;
+        enum degraded {
+          description
+            "FRR does not have the routes of running: the last change
+             or repair failed and could not be undone, or FRR has a
+             static route the agent cannot express.";
+        }
+      }
+    }
+    leaf last-error {
+      type string;
+    }
+    leaf repairs {
+      type uint64;
+      description
+        "How many times the agent found FRR different from running
+         and put running back.";
+    }
+  }
+}

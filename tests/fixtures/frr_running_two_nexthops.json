@@ -1,0 +1,67 @@
+{
+  "frr-routing:routing": {
+    "control-plane-protocols": {
+      "control-plane-protocol": [
+        {
+          "type": "frr-staticd:staticd",
+          "name": "staticd",
+          "vrf": "default",
+          "frr-staticd:staticd": {
+            "route-list": [
+              {
+                "prefix": "198.51.100.0/24",
+                "src-prefix": "::/0",
+                "afi-safi": "frr-routing:ipv4-unicast",
+                "path-list": [
+                  {
+                    "table-id": 0,
+                    "distance": 1,
+                    "frr-nexthops": {
+                      "nexthop": [
+                        {
+                          "nh-type": "ip4",
+                          "vrf": "default",
+                          "gateway": "203.0.113.9",
+                          "interface": "(null)"
+                        },
+                        {
+                          "nh-type": "ip4",
+                          "vrf": "default",
+                          "gateway": "203.0.113.10",
+                          "interface": "(null)"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "prefix": "198.51.100.128/25",
+                "src-prefix": "::/0",
+                "afi-safi": "frr-routing:ipv4-unicast",
+                "path-list": [
+                  {
+                    "table-id": 0,
+                    "distance": 1,
+                    "frr-nexthops": {
+                      "nexthop": [
+                        {
+                          "nh-type": "blackhole",
+                          "vrf": "default",
+                          "gateway": "",
+                          "interface": "(null)",
+                          "bh-type": "unspec"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
+

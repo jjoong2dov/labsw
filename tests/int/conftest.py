@@ -29,6 +29,7 @@ PREFIX = Path(os.environ.get("LABSW_PREFIX", Path.home() / "opt/labsw-host"))
 BUILD = Path(os.environ.get("LABSW_BUILD", REPO / "build"))
 KEY = Path(os.environ.get("LABSW_NC_KEY", PREFIX / "keys/nc_test"))
 TARGET = os.environ.get("LABSW_TARGET", "mock")
+VTYSH = os.environ.get("LABSW_VTYSH", "/usr/bin/vtysh")
 NS = "urn:example:labsw-switch"
 
 SERVER_XML = """\
@@ -78,16 +79,28 @@ class MockDevice:
 
     def __init__(self, lab):
         self.state = lab.base / "state.json"
+        self.rstate = lab.base / "routes.json"
         self.trace = lab.base / "trace.txt"
 
     def setup(self, ports):
         self._write({"vlan_filtering": True, "ports": {p: [] for p in ports}})
+        self.rstate.write_text('{"routes": {}}')
 
     def teardown(self):
         pass
 
     def agent_args(self):
-        return ["-a", "mock", "-m", str(self.state), "-t", str(self.trace)]
+        return ["-a", "mock", "-m", str(self.state), "-r", str(self.rstate), "-t", str(self.trace)]
+
+    def routes(self):
+        """{prefix: gateway or "blackhole"}; a prefix with several next hops gives a list"""
+        r = json.loads(self.rstate.read_text())["routes"]
+        return {p: nh[0] if len(nh) == 1 else sorted(nh) for p, nh in r.items()}
+
+    def set_routes(self, routes):
+        """replace every static route behind the agent's back; a list value = several next hops"""
+        self.rstate.write_text(json.dumps({"routes": {p: (g if isinstance(g, list) else [g])
+                                                      for p, g in routes.items()}}))
 
     def _write(self, st):
         self.state.write_text(json.dumps(st, indent=1))
@@ -129,6 +142,7 @@ class BridgeDevice:
 
     def setup(self, ports):
         self.ports_ = list(ports)
+        self.set_routes({})
         subprocess.run(["ip", "netns", "add", self.ns], check=True)
         # vlan_default_pvid 0: a new port has no VLAN at all, like an unlisted port in the model
         self.sh("ip", "link", "add", "br0", "type", "bridge", "vlan_filtering", "1", "vlan_default_pvid", "0")
@@ -143,12 +157,45 @@ class BridgeDevice:
             self.sh("ip", "link", "set", "lo", "up", ns=h)
 
     def teardown(self):
+        self.set_routes({})
         for i in range(1, len(self.ports_) + 1):
             subprocess.run(["ip", "netns", "del", f"{self.ns}-h{i}"], capture_output=True)
         subprocess.run(["ip", "netns", "del", self.ns], capture_output=True)
 
     def agent_args(self):
-        return ["-b", "br0"]
+        return ["-b", "br0", "-f", VTYSH]
+
+    # routes: the system FRR (one instance; tests run one after another). Every
+    # IPv4 static route is removed before and after each test.
+    def vtysh(self, *cmds, check=True):
+        argv = [VTYSH]
+        for c in cmds:
+            argv += ["-c", c]
+        r = subprocess.run(argv, check=check, capture_output=True, text=True)
+        return r.stdout
+
+    def routes(self):
+        js = json.loads(self.vtysh("show mgmt datastore-contents running json") or "{}")
+        res = {}
+        for proto in js.get("frr-routing:routing", {}).get("control-plane-protocols", {}).get("control-plane-protocol", []):
+            for rt in proto.get("frr-staticd:staticd", {}).get("route-list", []):
+                if rt.get("afi-safi") != "frr-routing:ipv4-unicast":
+                    continue
+                nhs = [nh.get("gateway") if nh.get("nh-type") == "ip4" else nh.get("nh-type")
+                       for path in rt.get("path-list", []) for nh in path.get("frr-nexthops", {}).get("nexthop", [])]
+                res[rt["prefix"]] = nhs[0] if len(nhs) == 1 else sorted(nhs)
+        return res
+
+    def set_routes(self, routes):
+        cmds = []
+        for p, g in self.routes().items():
+            for nh in (g if isinstance(g, list) else [g]):
+                cmds.append(f"no ip route {p} {nh}")
+        for p, g in routes.items():
+            for nh in (g if isinstance(g, list) else [g]):
+                cmds.append(f"ip route {p} {nh}")
+        if cmds:
+            self.vtysh("configure terminal", *cmds)
 
     def agent_prefix(self):
         return ["ip", "netns", "exec", self.ns]
@@ -177,7 +224,7 @@ class BridgeDevice:
     def set_filtering(self, on):
         self.sh("ip", "link", "set", "br0", "type", "bridge", "vlan_filtering", "1" if on else "0")
 
-    CMD = re.compile(r"^labswd: (?:restore: )?((?:set|del) .*) -> ok$", re.M)
+    CMD = re.compile(r"^labswd: (?:restore: )?((?:set|del|add) .*) -> ok$", re.M)
 
     def commands(self, lab):
         """device commands that succeeded, from the agent's log"""
@@ -242,12 +289,14 @@ class Lab:
                                          "-p", str(self.base / "np2.pid"),
                                          "-f", str(self.base / "np2")], listening)
 
-    def start_agent(self, fail_at=None, prio=None, every=None):
+    def start_agent(self, fail_at=None, prio=None, every=None, route_fail_at=None):
         argv = getattr(self.dev, "agent_prefix", list)() + [str(BUILD / "labswd")] + self.dev.agent_args()
         if prio is not None:
             argv += ["-P", str(prio)]
         if every is not None:
             argv += ["-R", str(every)]
+        if route_fail_at:
+            argv += ["-G", str(route_fail_at)]
         if fail_at:
             argv += ["-F", str(fail_at)]
         start = self.log("labswd").count("labswd: running")

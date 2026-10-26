@@ -17,4 +17,4 @@ export NP2_MODULE_PERMS=600 SR_NOTIFD_MODULE_DIR=$prefix/share/yang/modules/sysr
 bash "$prefix/share/sysrepo/scripts/setup_notifd.sh" >/dev/null
 bash "$prefix/share/netopeer2/scripts/setup.sh" >/dev/null
 bash "$prefix/share/netopeer2/scripts/merge_hostkey.sh" >/dev/null
-"$SYSREPOCTL_EXECUTABLE" -i "$here"/yang/labsw-switch@*.yang -p 600
+for y in "$here"/yang/*.yang; do "$SYSREPOCTL_EXECUTABLE" -i "$y" -p 600; done

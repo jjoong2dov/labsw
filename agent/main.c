@@ -10,6 +10,8 @@
  * If the agent dies between CHANGE and DONE, nothing restores the device; the
  * next start (ENABLED) makes it equal to running again.
  *
+ * With -f vtysh the agent also keeps /labsw-route:routes in FRR (routes.c).
+ *
  * With -R n the agent also compares running with the device every n seconds and
  * puts back what someone changed outside NETCONF (policy: NETCONF wins). It
  * skips a round while a change is between CHANGE and DONE/ABORT.
@@ -31,6 +33,7 @@
 
 #include "adapter/adapter.h"
 #include "core/txn.h"
+#include "routes.h"
 
 #define MODULE "labsw-switch"
 #define MAX_PENDING 8
@@ -314,6 +317,25 @@ end:
     lsw_state_free(&snap);
 }
 
+static int on_route_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *xpath,
+                           sr_event_t event, uint32_t op_id, void *priv)
+{
+    int rc;
+    (void)sub_id; (void)module; (void)xpath; (void)priv;
+
+    pthread_mutex_lock(&g.txn_lock);
+    rc = routes_on_change(sess, event, op_id);
+    pthread_mutex_unlock(&g.txn_lock);
+    return rc;
+}
+
+static int on_route_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *path,
+                         const char *request_xpath, uint32_t op_id, struct lyd_node **parent, void *priv)
+{
+    (void)sub_id; (void)module; (void)path; (void)request_xpath; (void)op_id; (void)priv;
+    return routes_on_oper(sess, parent);
+}
+
 static int on_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *path,
                    const char *request_xpath, uint32_t op_id, struct lyd_node **parent, void *priv)
 {
@@ -378,9 +400,9 @@ end:
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: labswd [-b bridge] [-P priority] [-R seconds] [-v]\n"
+    fprintf(stderr, "usage: labswd [-b bridge] [-f /path/to/vtysh [-N frr-instance]] [-P priority] [-R seconds] [-v]\n"
 #ifdef LSW_TESTING
-                    "       labswd -a mock -m state.json [-t trace.txt] [-F n]   (test build)\n"
+                    "       labswd -a mock -m state.json [-r routes.json] [-t trace.txt] [-F n] [-G n]   (test build)\n"
 #endif
     );
 }
@@ -388,6 +410,9 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     const char *bridge = "br0", *adapter = "bridge", *mock_state = NULL, *trace = NULL;
+    const char *vtysh = NULL, *frr_ns = NULL, *mock_routes = NULL;
+    struct lsw_route_adapter *ra = NULL;
+    int route_fail_at = 0;
     sr_conn_ctx_t *conn = NULL;
     sr_session_ctx_t *sess = NULL;
     sr_subscription_ctx_t *sub = NULL;
@@ -396,17 +421,21 @@ int main(int argc, char **argv)
     int opt, rc = 1, sig, every = 0;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    while ((opt = getopt(argc, argv, "b:P:R:a:m:t:F:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "b:f:N:P:R:a:m:r:t:F:G:vh")) != -1) {
         switch (opt) {
         case 'b': bridge = optarg; break;
         case 'v': g.verbose = 1; break;
         case 'P': prio = (uint32_t)strtoul(optarg, NULL, 10); break;
         case 'R': every = atoi(optarg); break;
+        case 'f': vtysh = optarg; break;
+        case 'N': frr_ns = optarg; break;
 #ifdef LSW_TESTING
         case 'a': adapter = optarg; break;
         case 'm': mock_state = optarg; break;
         case 't': trace = optarg; break;
         case 'F': g.txn.fail_at = atoi(optarg); break;
+        case 'G': route_fail_at = atoi(optarg); break;
+        case 'r': mock_routes = optarg; break;
 #endif
         default: usage(); return 2;
         }
@@ -421,6 +450,17 @@ int main(int argc, char **argv)
         usage();
         return 2;
     }
+#ifdef LSW_TESTING
+    if (mock_routes)
+        ra = lsw_mock_route_adapter(mock_routes, trace);
+    else
+#endif
+    if (vtysh && !(ra = lsw_frr_adapter(vtysh, frr_ns))) {
+        fprintf(stderr, "labswd: -f needs an absolute path to vtysh\n");
+        return 2;
+    }
+    if (ra && routes_init(ra, route_fail_at, log_line))
+        return 1;
     for (int i = 0; i < MAX_PENDING; i++)
         if (lsw_state_init(&g.pending[i].snap))
             return 1;
@@ -445,14 +485,27 @@ int main(int argc, char **argv)
         logf_("change subscribe: %s (could not apply the running configuration)", sr_strerror(rc));
         goto end;
     }
-    logf_("running (adapter %s)", g.a->name);
+    if (ra && ((rc = sr_oper_get_subscribe(sess, ROUTE_MODULE, "/" ROUTE_MODULE ":routes-state", on_route_oper, NULL,
+                                           0, &sub)) ||
+               (rc = sr_module_change_subscribe(sess, ROUTE_MODULE, NULL, on_route_change, NULL, prio,
+                                                SR_SUBSCR_ENABLED, &sub)))) {
+        logf_("%s subscribe: %s", ROUTE_MODULE, sr_strerror(rc));
+        goto end;
+    }
+    logf_("running (adapter %s%s%s)", g.a->name, ra ? ", " : "", ra ? ra->name : "");
     for (;;) {
         struct timespec ts = {.tv_sec = every};
         sig = every > 0 ? sigtimedwait(&sigs, NULL, &ts) : sigwaitinfo(&sigs, NULL);
         if (sig > 0)
             break;
-        if (every > 0)
-            reconcile(sess); /* timeout (or EINTR): one round */
+        if (every > 0) { /* timeout (or EINTR): one round */
+            reconcile(sess);
+            if (ra) {
+                pthread_mutex_lock(&g.txn_lock);
+                routes_reconcile(sess);
+                pthread_mutex_unlock(&g.txn_lock);
+            }
+        }
     }
     logf_("signal %d, stopping", sig);
     rc = 0;
@@ -460,6 +513,7 @@ end:
     sr_unsubscribe(sub);
     sr_disconnect(conn);
     g.a->destroy(g.a);
+    routes_cleanup();
     for (int i = 0; i < MAX_PENDING; i++)
         lsw_state_free(&g.pending[i].snap);
     return rc ? 1 : 0;
