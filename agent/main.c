@@ -1,0 +1,365 @@
+/* main.c - labswd: keeps a Linux bridge equal to /labsw-switch:switch in running
+ *
+ * sysrepo events (module change subscription with SR_SUBSCR_ENABLED):
+ *   ENABLED  agent start: apply what running already has
+ *   CHANGE   validate, apply to the device, read back; on any failure restore
+ *            the device here (a failing subscriber gets no ABORT) and reject
+ *   ABORT    another subscriber rejected the change after we applied it: restore
+ *   DONE     the change is committed: forget the snapshot
+ * If the agent dies between CHANGE and DONE, nothing restores the device; the
+ * next start (ENABLED) makes it equal to running again.
+ *
+ * SPDX-License-Identifier: MIT */
+#define _GNU_SOURCE
+#include <getopt.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <libyang/libyang.h>
+#include <sysrepo.h>
+#include <sysrepo/error_format.h>
+
+#include "adapter/adapter.h"
+#include "core/txn.h"
+
+#define MODULE "labsw-switch"
+#define MAX_PENDING 8
+
+static struct {
+    struct lsw_adapter *a;
+    struct lsw_txn txn;
+    int verbose;
+    pthread_mutex_t lock;
+    int degraded;
+    char last_error[512];
+    struct {
+        int used;
+        uint32_t op_id;
+        struct lsw_state snap;
+    } pending[MAX_PENDING];
+} g = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+static void log_line(const char *msg)
+{
+    printf("labswd: %s\n", msg);
+}
+
+static void logf_(const char *fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    log_line(buf);
+}
+
+static void set_health(int degraded, const char *err)
+{
+    pthread_mutex_lock(&g.lock);
+    g.degraded = degraded;
+    snprintf(g.last_error, sizeof(g.last_error), "%s", err ? err : "");
+    pthread_mutex_unlock(&g.lock);
+}
+
+/* /labsw-switch:switch of the session's view -> wanted device state */
+static int read_wanted(sr_session_ctx_t *sess, struct lsw_state *want, char *err, size_t len)
+{
+    sr_data_t *data = NULL;
+    struct lyd_node *port, *n, *v, *c;
+    int rc = -1;
+
+    lsw_state_clear(want);
+    if (sr_get_data(sess, "/" MODULE ":switch", 0, 0, 0, &data) != SR_ERR_OK) {
+        snprintf(err, len, "cannot read /%s:switch", MODULE);
+        return -1;
+    }
+    if (!data || !data->tree) {
+        rc = 0; /* empty config: every port without VLANs */
+        goto end;
+    }
+    LY_LIST_FOR(lyd_child(data->tree), port) {
+        struct lsw_port *p = NULL;
+        if (strcmp(LYD_NAME(port), "port"))
+            continue;
+        LY_LIST_FOR(lyd_child(port), n) {
+            if (!strcmp(LYD_NAME(n), "name") && !(p = lsw_state_port(want, lyd_get_value(n)))) {
+                snprintf(err, len, "port %s: too many ports", lyd_get_value(n));
+                goto end;
+            }
+        }
+        LY_LIST_FOR(lyd_child(port), v) {
+            int vid = 0;
+            uint8_t f = LSW_F_MEMBER;
+            if (strcmp(LYD_NAME(v), "vlan"))
+                continue;
+            LY_LIST_FOR(lyd_child(v), c) {
+                const char *val = lyd_get_value(c);
+                if (!strcmp(LYD_NAME(c), "vid"))
+                    vid = atoi(val);
+                else if (!strcmp(LYD_NAME(c), "pvid") && !strcmp(val, "true"))
+                    f |= LSW_F_PVID;
+                else if (!strcmp(LYD_NAME(c), "egress") && !strcmp(val, "untagged"))
+                    f |= LSW_F_UNTAGGED;
+            }
+            if (p && vid >= 1 && vid <= LSW_VID_MAX)
+                p->vid[vid] = f;
+        }
+    }
+    rc = 0;
+end:
+    sr_release_data(data);
+    return rc;
+}
+
+/* device facts YANG cannot check: every configured port must exist on the bridge */
+static int validate(sr_session_ctx_t *sess, const struct lsw_state *want)
+{
+    struct lsw_state dev;
+    char err[256], path[128];
+    int rc = SR_ERR_OK;
+
+    if (lsw_state_init(&dev))
+        return SR_ERR_NO_MEMORY;
+    if (g.a->read(g.a, &dev, err, sizeof(err))) {
+        sr_session_set_netconf_error(sess, "application", "operation-failed", NULL, NULL, err, 0);
+        rc = SR_ERR_OPERATION_FAILED;
+        goto end;
+    }
+    for (int i = 0; i < want->nports; i++) {
+        if (lsw_state_find(&dev, want->port[i].name))
+            continue;
+        /* the name matched the YANG pattern, so it cannot contain a quote */
+        snprintf(path, sizeof(path), "/%s:switch/port[name='%s']", MODULE, want->port[i].name);
+        snprintf(err, sizeof(err), "Port \"%s\" is not a port of the bridge.", want->port[i].name);
+        sr_session_set_netconf_error(sess, "application", "invalid-value", NULL, path, err, 0);
+        rc = SR_ERR_VALIDATION_FAILED;
+        break;
+    }
+end:
+    lsw_state_free(&dev);
+    return rc;
+}
+
+static int pending_slot(uint32_t op_id, int create)
+{
+    int free_slot = -1;
+    for (int i = 0; i < MAX_PENDING; i++) {
+        if (g.pending[i].used && g.pending[i].op_id == op_id)
+            return i;
+        if (!g.pending[i].used && free_slot < 0)
+            free_slot = i;
+    }
+    if (!create || free_slot < 0)
+        return -1;
+    g.pending[free_slot].used = 1;
+    g.pending[free_slot].op_id = op_id;
+    return free_slot;
+}
+
+static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *xpath,
+                     sr_event_t event, uint32_t op_id, void *priv)
+{
+    struct lsw_state want, snap;
+    char err[1024];
+    int rc = SR_ERR_OK, slot;
+    (void)sub_id; (void)module; (void)xpath; (void)priv;
+
+    if (event == SR_EV_DONE || event == SR_EV_ABORT) {
+        slot = pending_slot(op_id, 0);
+        if (slot < 0)
+            return SR_ERR_OK; /* e.g. the DONE that follows ENABLED */
+        if (event == SR_EV_ABORT) {
+            logf_("op %u: aborted by another subscriber, restoring", op_id);
+            if (lsw_txn_restore(&g.txn, &g.pending[slot].snap, err, sizeof(err))) {
+                logf_("op %u: restore failed: %s", op_id, err);
+                set_health(1, err);
+            } else {
+                set_health(0, "change aborted by another subscriber; previous state restored");
+            }
+        }
+        g.pending[slot].used = 0;
+        return SR_ERR_OK;
+    }
+    if (event != SR_EV_CHANGE && event != SR_EV_ENABLED)
+        return SR_ERR_OK;
+
+    if (lsw_state_init(&want) || lsw_state_init(&snap))
+        return SR_ERR_NO_MEMORY;
+    logf_("op %u: %s", op_id, event == SR_EV_ENABLED ? "start, applying running" : "change");
+    if (read_wanted(sess, &want, err, sizeof(err))) {
+        sr_session_set_netconf_error(sess, "application", "operation-failed", NULL, NULL, err, 0);
+        rc = SR_ERR_OPERATION_FAILED;
+        goto end;
+    }
+    if ((rc = validate(sess, &want)) != SR_ERR_OK)
+        goto end;
+    switch (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err))) {
+    case LSW_TXN_OK:
+        set_health(0, NULL);
+        if (event == SR_EV_CHANGE) {
+            slot = pending_slot(op_id, 1);
+            if (slot >= 0)
+                lsw_state_copy(&g.pending[slot].snap, &snap);
+            else
+                logf_("op %u: too many open changes, an ABORT could not be undone", op_id);
+        }
+        break;
+    case LSW_TXN_FAILED:
+        set_health(0, err);
+        sr_session_set_netconf_error(sess, "application", "operation-failed", NULL, NULL, err, 0);
+        rc = SR_ERR_OPERATION_FAILED;
+        break;
+    case LSW_TXN_FAILED_DEGRADED:
+        set_health(1, err);
+        sr_session_set_netconf_error(sess, "application", "operation-failed", NULL, NULL, err, 0);
+        rc = SR_ERR_OPERATION_FAILED;
+        break;
+    }
+end:
+    logf_("op %u: %s", op_id, rc == SR_ERR_OK ? "ok" : err);
+    lsw_state_free(&want);
+    lsw_state_free(&snap);
+    return rc;
+}
+
+static int on_oper(sr_session_ctx_t *sess, uint32_t sub_id, const char *module, const char *path,
+                   const char *request_xpath, uint32_t op_id, struct lyd_node **parent, void *priv)
+{
+    const struct ly_ctx *ctx;
+    const struct lys_module *mod;
+    struct lsw_state dev;
+    struct lyd_node *pn, *vn;
+    char err[512], vid[8];
+    int rc = SR_ERR_OK, degraded;
+    (void)sub_id; (void)module; (void)path; (void)request_xpath; (void)op_id; (void)priv;
+
+    if (lsw_state_init(&dev))
+        return SR_ERR_NO_MEMORY;
+    ctx = sr_session_acquire_context(sess);
+    mod = ly_ctx_get_module_implemented(ctx, MODULE);
+    if (!*parent && lyd_new_inner(NULL, mod, "switch-state", 0, parent)) {
+        rc = SR_ERR_LY;
+        goto end;
+    }
+    pthread_mutex_lock(&g.lock);
+    degraded = g.degraded;
+    snprintf(err, sizeof(err), "%s", g.last_error);
+    pthread_mutex_unlock(&g.lock);
+    if (lyd_new_term(*parent, mod, "health", degraded ? "degraded" : "ok", 0, NULL) ||
+        (err[0] && lyd_new_term(*parent, mod, "last-error", err, 0, NULL))) {
+        rc = SR_ERR_LY;
+        goto end;
+    }
+    if (g.a->read(g.a, &dev, err, sizeof(err))) {
+        logf_("oper: %s", err);
+        rc = SR_ERR_OPERATION_FAILED;
+        goto end;
+    }
+    for (int i = 0; i < dev.nports; i++) {
+        const struct lsw_port *p = &dev.port[i];
+        /* keys are passed as values, never pasted into a path string */
+        if (lyd_new_list(*parent, mod, "port", 0, &pn, p->name)) {
+            rc = SR_ERR_LY;
+            goto end;
+        }
+        for (int v = 1; v <= LSW_VID_MAX; v++) {
+            if (!p->vid[v])
+                continue;
+            snprintf(vid, sizeof(vid), "%d", v);
+            if (lyd_new_list(pn, mod, "vlan", 0, &vn, vid) ||
+                lyd_new_term(vn, mod, "pvid", p->vid[v] & LSW_F_PVID ? "true" : "false", 0, NULL) ||
+                lyd_new_term(vn, mod, "egress", p->vid[v] & LSW_F_UNTAGGED ? "untagged" : "tagged", 0, NULL)) {
+                rc = SR_ERR_LY;
+                goto end;
+            }
+        }
+    }
+end:
+    sr_session_release_context(sess);
+    lsw_state_free(&dev);
+    return rc;
+}
+
+static void usage(void)
+{
+    fprintf(stderr, "usage: labswd [-b bridge] [-v]\n"
+#ifdef LSW_TESTING
+                    "       labswd -a mock -m state.json [-t trace.txt] [-F n]   (test build)\n"
+#endif
+    );
+}
+
+int main(int argc, char **argv)
+{
+    const char *bridge = "br0", *adapter = "bridge", *mock_state = NULL, *trace = NULL;
+    sr_conn_ctx_t *conn = NULL;
+    sr_session_ctx_t *sess = NULL;
+    sr_subscription_ctx_t *sub = NULL;
+    sigset_t sigs;
+    int opt, rc = 1, sig;
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    while ((opt = getopt(argc, argv, "b:a:m:t:F:vh")) != -1) {
+        switch (opt) {
+        case 'b': bridge = optarg; break;
+        case 'v': g.verbose = 1; break;
+#ifdef LSW_TESTING
+        case 'a': adapter = optarg; break;
+        case 'm': mock_state = optarg; break;
+        case 't': trace = optarg; break;
+        case 'F': g.txn.fail_at = atoi(optarg); break;
+#endif
+        default: usage(); return 2;
+        }
+    }
+#ifdef LSW_TESTING
+    if (!strcmp(adapter, "mock"))
+        g.a = mock_state ? lsw_mock_adapter(mock_state, trace) : NULL;
+    else
+#endif
+        g.a = lsw_bridge_adapter(bridge);
+    if (!g.a) {
+        usage();
+        return 2;
+    }
+    for (int i = 0; i < MAX_PENDING; i++)
+        if (lsw_state_init(&g.pending[i].snap))
+            return 1;
+    g.txn.a = g.a;
+    g.txn.log = log_line;
+
+    /* signals are taken by sigwait() below, not by a handler */
+    sigemptyset(&sigs);
+    sigaddset(&sigs, SIGINT);
+    sigaddset(&sigs, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &sigs, NULL); /* before sysrepo starts its threads */
+
+    if ((rc = sr_connect(0, &conn)) || (rc = sr_session_start(conn, SR_DS_RUNNING, &sess))) {
+        logf_("sysrepo: %s", sr_strerror(rc));
+        goto end;
+    }
+    if ((rc = sr_oper_get_subscribe(sess, MODULE, "/" MODULE ":switch-state", on_oper, NULL, 0, &sub))) {
+        logf_("oper subscribe: %s", sr_strerror(rc));
+        goto end;
+    }
+    if ((rc = sr_module_change_subscribe(sess, MODULE, NULL, on_change, NULL, 0, SR_SUBSCR_ENABLED, &sub))) {
+        logf_("change subscribe: %s (could not apply the running configuration)", sr_strerror(rc));
+        goto end;
+    }
+    logf_("running (adapter %s)", g.a->name);
+    sigwait(&sigs, &sig);
+    logf_("signal %d, stopping", sig);
+    rc = 0;
+end:
+    sr_unsubscribe(sub);
+    sr_disconnect(conn);
+    g.a->destroy(g.a);
+    for (int i = 0; i < MAX_PENDING; i++)
+        lsw_state_free(&g.pending[i].snap);
+    return rc ? 1 : 0;
+}
