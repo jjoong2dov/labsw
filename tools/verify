@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""verify --target host|remote [options] : run the labsw tests and write a summary
+
+  host    on this PC: unit tests (ctest) + integration tests with the mock adapters
+  remote  on a VM or the Pi over SSH: integration tests against the real bridge and
+          FRR (LABSW_TARGET=bridge, as root). Copies the tests, the YANG modules and
+          a test build for the device (tools/xbuild.sh) to ~/labsw-verify there.
+
+Writes results/<time>-<target>/summary.json (commit, target, versions, command,
+passed/failed/skipped, seconds) next to junit.xml and the console log. A skipped
+test is not a pass. Exit code 0 only if nothing failed and something ran.
+SPDX-License-Identifier: MIT
+"""
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def sh(argv, **kw):
+    return subprocess.run(argv, check=True, text=True, **kw)
+
+
+def junit_counts(path):
+    root = ET.parse(path).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root)
+    c = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    for s in suites:
+        for k in c:
+            c[k] += int(s.get(k, 0))
+    return {"passed": c["tests"] - c["failures"] - c["errors"] - c["skipped"],
+            "failed": c["failures"] + c["errors"], "skipped": c["skipped"]}
+
+
+def commit():
+    r = subprocess.run(["git", "-C", str(REPO), "describe", "--always", "--dirty"], capture_output=True, text=True)
+    return r.stdout.strip() or "unknown"
+
+
+def run_host(args, out):
+    build = Path(args.build or REPO / "build")
+    sh(["cmake", "-S", str(REPO), "-B", str(build), "-DLABSW_TESTING=ON"], stdout=subprocess.DEVNULL)
+    sh(["cmake", "--build", str(build), "-j", str(os.cpu_count() or 2)], stdout=subprocess.DEVNULL)
+    unit = subprocess.run(["ctest", "--test-dir", str(build), "--output-junit", str(out / "unit.xml")],
+                          capture_output=True, text=True)
+    (out / "unit.log").write_text(unit.stdout + unit.stderr)
+    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={out / 'junit.xml'}"]
+    if args.k:
+        cmd += ["-k", args.k]
+    env = dict(os.environ, LABSW_BUILD=str(build), LABSW_TARGET="mock")
+    t0 = time.monotonic()
+    with open(out / "console.log", "w") as log:
+        subprocess.run(cmd, cwd=REPO / "tests/int", env=env, stdout=log, stderr=subprocess.STDOUT)
+    secs = time.monotonic() - t0
+    counts = junit_counts(out / "junit.xml")
+    u = junit_counts(out / "unit.xml")
+    return {"command": " ".join(cmd), "seconds": round(secs, 1), "unit": u, **counts,
+            "versions": versions_local(build)}
+
+
+def versions_local(build):
+    v = {}
+    for name, argv in (("netopeer2", ["netopeer2-server", "-V"]), ("sysrepo", ["sysrepoctl", "-V"])):
+        r = subprocess.run(argv, capture_output=True, text=True)
+        v[name] = (r.stdout or r.stderr).strip().splitlines()[0] if r.returncode == 0 else None
+    return v
+
+
+def run_remote(args, out):
+    ssh = shlex.split(args.ssh)
+    scp = shlex.split(args.scp)
+    rdir = "labsw-verify"
+    build = Path(args.build or REPO / "build-aarch64")
+    for f in ("labswd", "reject_sub"):
+        if not (build / f).exists():
+            raise SystemExit(f"verify: no {build / f}; run tools/xbuild.sh first")
+    sh(ssh + [f"sudo rm -rf {rdir} && mkdir -p {rdir}/build {rdir}/tests {rdir}/yang {rdir}/keys && "
+              f"ssh-keygen -q -t ed25519 -N '' -f {rdir}/keys/nc_test"], stdout=subprocess.DEVNULL)
+    host = args.dest
+    sh(scp + ["-q", "-r", str(REPO / "tests/int"), f"{host}:{rdir}/tests/"])
+    sh(scp + ["-q"] + [str(p) for p in sorted((REPO / "yang").glob("*.yang"))] + [f"{host}:{rdir}/yang/"])
+    sh(scp + ["-q", str(build / "labswd"), str(build / "reject_sub"), f"{host}:{rdir}/build/"])
+    k = f" -k {shlex.quote(args.k)}" if args.k else ""
+    remote = (f"cd {rdir}/tests/int && sudo env LABSW_TARGET=bridge LABSW_PREFIX={args.prefix} "
+              f"LABSW_BUILD=$HOME/{rdir}/build LABSW_NC_KEY=$HOME/{rdir}/keys/nc_test "
+              f"python3 -m pytest -q -p no:cacheprovider -rfEs --junitxml=$HOME/{rdir}/junit.xml{k}; "
+              f"sudo chown $(id -u) $HOME/{rdir}/junit.xml")
+    t0 = time.monotonic()
+    with open(out / "console.log", "w") as log:
+        subprocess.run(ssh + [remote], stdout=log, stderr=subprocess.STDOUT)
+    secs = time.monotonic() - t0
+    sh(scp + ["-q", f"{host}:{rdir}/junit.xml", str(out / "junit.xml")])
+    ver = subprocess.run(ssh + [f"uname -srm; {args.prefix}/sbin/netopeer2-server -V; "
+                                "/usr/bin/vtysh -c 'show version' | head -1"], capture_output=True, text=True)
+    return {"command": remote, "seconds": round(secs, 1), **junit_counts(out / "junit.xml"),
+            "versions": ver.stdout.strip().splitlines()}
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--target", choices=["host", "remote"], required=True)
+    ap.add_argument("--name", help="label for the results directory (vm, pi, ...)")
+    ap.add_argument("--build", help="build directory (host: build/, remote: build-aarch64/)")
+    ap.add_argument("-k", help="pytest -k expression")
+    ap.add_argument("--ssh", default=os.environ.get("LABSW_SSH", ""), help='e.g. "ssh -p 2223 -i key dev@127.0.0.1"')
+    ap.add_argument("--scp", default=os.environ.get("LABSW_SCP", ""), help='e.g. "scp -P 2223 -i key"')
+    ap.add_argument("--dest", default=os.environ.get("LABSW_DEST", ""), help="user@host for scp")
+    ap.add_argument("--prefix", default="/opt/labsw", help="stack prefix on the device")
+    args = ap.parse_args()
+    if args.target == "remote" and not (args.ssh and args.scp and args.dest):
+        ap.error("remote needs --ssh, --scp and --dest (or LABSW_SSH, LABSW_SCP, LABSW_DEST)")
+    name = args.name or args.target
+    out = REPO / "results" / f"{time.strftime('%Y%m%d-%H%M%S')}-{name}"
+    out.mkdir(parents=True)
+    res = run_host(args, out) if args.target == "host" else run_remote(args, out)
+    summary = {"target": name, "commit": commit(), "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "pytest_k": args.k, **res, "results": str(out)}
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    print(json.dumps({k: summary[k] for k in ("target", "commit", "passed", "failed", "skipped", "seconds")}))
+    unit_failed = res.get("unit", {}).get("failed", 0)
+    ok = res["failed"] == 0 and unit_failed == 0 and res["passed"] > 0
+    print(("PASS" if ok else "FAIL") + f"  {out / 'summary.json'}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
