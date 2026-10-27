@@ -40,6 +40,10 @@ int lsw_valid_port_name(const char *name);
 /* compare: returns 0 if equal, else writes the first difference to why */
 int lsw_state_diff(const struct lsw_state *a, const struct lsw_state *b, char *why, size_t len);
 
+/* like lsw_state_diff(dev, want), but the first difference as a sentence for an
+ * operator: "port p3: VLAN 99 (tagged) is on the device but not in running" */
+int lsw_state_drift_text(const struct lsw_state *dev, const struct lsw_state *want, char *buf, size_t len);
+
 /* "10PU 20" style text of one port, for logs and tests */
 void lsw_port_text(const struct lsw_port *p, char *buf, size_t len);
 

@@ -16,6 +16,10 @@
  * puts back what someone changed outside NETCONF (policy: NETCONF wins). It
  * skips a round while a change is between CHANGE and DONE/ABORT.
  *
+ * Notifications (health-changed, repaired) are queued where they happen and
+ * sent by their own thread: the places that notice them hold txn_lock, and
+ * sysrepo must not be called with txn_lock held.
+ *
  * What this is not: a transaction across the bridge and FRR. A change is applied
  * module by module during CHANGE and undone on failure or ABORT as well as the
  * agent can (best effort); in between, one may have the new state and the other
@@ -44,6 +48,7 @@
 #define MODULE "labsw-switch"
 #define MAX_PENDING 8
 #define PENDING_MAX_AGE 60 /* s: a change with no DONE/ABORT after this is dropped */
+#define NOTIF_QUEUE 32
 
 static struct {
     struct lsw_adapter *a;
@@ -66,6 +71,21 @@ static struct {
     int seen_valid;
 } g = {.lock = PTHREAD_MUTEX_INITIALIZER, .txn_lock = PTHREAD_MUTEX_INITIALIZER};
 
+struct notif {
+    int repaired; /* else health-changed */
+    int degraded;
+    uint64_t repairs;
+    char text[1024]; /* reason or difference */
+};
+
+/* notifications waiting for the sender thread; taken after g.lock, never before */
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    struct notif q[NOTIF_QUEUE];
+    int head, n, stop;
+} nq = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER};
+
 static void log_line(const char *msg)
 {
     printf("labswd: %s\n", msg);
@@ -81,12 +101,105 @@ static void logf_(const char *fmt, ...)
     log_line(buf);
 }
 
-static void set_health(int degraded, const char *err)
+static void notif_push(const struct notif *n)
 {
-    pthread_mutex_lock(&g.lock);
+    pthread_mutex_lock(&nq.lock);
+    if (nq.n == NOTIF_QUEUE) {
+        /* the sender is stuck; a newer notification is worth more than an old one */
+        logf_("notification queue full, dropping the oldest");
+        nq.head = (nq.head + 1) % NOTIF_QUEUE;
+        nq.n--;
+    }
+    nq.q[(nq.head + nq.n++) % NOTIF_QUEUE] = *n;
+    pthread_cond_signal(&nq.cond);
+    pthread_mutex_unlock(&nq.lock);
+}
+
+/* caller holds g.lock; 1 if health or the error text changed */
+static int set_health_locked(int degraded, const char *err)
+{
+    int changed;
+
+    err = err ? err : "";
+    changed = degraded != g.degraded || strcmp(err, g.last_error);
+    if (degraded != g.degraded) {
+        struct notif n = {.degraded = degraded};
+        snprintf(n.text, sizeof(n.text), "%s", degraded ? err : "");
+        notif_push(&n); /* under g.lock: queued in the order health changed */
+    }
     g.degraded = degraded;
-    snprintf(g.last_error, sizeof(g.last_error), "%s", err ? err : "");
+    snprintf(g.last_error, sizeof(g.last_error), "%s", err);
+    return changed;
+}
+
+static int set_health(int degraded, const char *err)
+{
+    int changed;
+
+    pthread_mutex_lock(&g.lock);
+    changed = set_health_locked(degraded, err);
     pthread_mutex_unlock(&g.lock);
+    return changed;
+}
+
+/* the device is fine again: ok, but keep last-error of a change that failed cleanly */
+static int set_ok_if_degraded(void)
+{
+    int changed = 0;
+
+    pthread_mutex_lock(&g.lock);
+    if (g.degraded)
+        changed = set_health_locked(0, NULL);
+    pthread_mutex_unlock(&g.lock);
+    return changed;
+}
+
+static void notif_send(sr_session_ctx_t *sess, const struct notif *n)
+{
+    const struct ly_ctx *ctx = sr_session_acquire_context(sess);
+    const struct lys_module *mod = ly_ctx_get_module_implemented(ctx, MODULE);
+    const char *name = n->repaired ? "repaired" : "health-changed";
+    struct lyd_node *tree = NULL;
+    char num[24];
+    int rc;
+
+    snprintf(num, sizeof(num), "%llu", (unsigned long long)n->repairs);
+    if (lyd_new_inner(NULL, mod, name, 0, &tree) ||
+        (n->repaired ? lyd_new_term(tree, mod, "repairs", num, 0, NULL) ||
+                           lyd_new_term(tree, mod, "difference", n->text, 0, NULL)
+                     : lyd_new_term(tree, mod, "health", n->degraded ? "degraded" : "ok", 0, NULL) ||
+                           (n->text[0] && lyd_new_term(tree, mod, "reason", n->text, 0, NULL)))) {
+        logf_("notification %s: cannot build it", name);
+    } else if ((rc = sr_notif_send_tree(sess, tree, 0, 0)) != SR_ERR_OK) {
+        logf_("notification %s: %s", name, sr_strerror(rc));
+    } else {
+        logf_("notification %s sent", name);
+    }
+    lyd_free_all(tree);
+    sr_session_release_context(sess);
+}
+
+/* sends what is queued; on stop, the rest of the queue first */
+static void *notifier(void *arg)
+{
+    sr_session_ctx_t *sess = arg;
+    struct notif n;
+
+    pthread_mutex_lock(&nq.lock);
+    for (;;) {
+        while (!nq.n && !nq.stop)
+            pthread_cond_wait(&nq.cond, &nq.lock);
+        if (!nq.n)
+            break;
+        n = nq.q[nq.head];
+        nq.head = (nq.head + 1) % NOTIF_QUEUE;
+        nq.n--;
+        pthread_mutex_unlock(&nq.lock);
+        notif_send(sess, &n);
+        pthread_mutex_lock(&nq.lock);
+    }
+    pthread_mutex_unlock(&nq.lock);
+    return NULL;
 }
 
 /* /labsw-switch:switch of the session's view -> wanted device state */
@@ -361,7 +474,7 @@ static int pending_any(void)
 static void reconcile(sr_session_ctx_t *sess, struct lsw_routes *rwant)
 {
     struct lsw_state want, dev, snap;
-    char err[1024], rerr[1024], why[160];
+    char err[1024], rerr[1024], why[256];
     unsigned start = atomic_load(&g.callbacks);
     int sw_ok, rt_ok = 0;
 
@@ -380,19 +493,26 @@ static void reconcile(sr_session_ctx_t *sess, struct lsw_routes *rwant)
         else
             routes_reconcile_failed(rerr);
     }
-    if (!sw_ok || g.a->read(g.a, &dev, err, sizeof(err))) {
-        set_health(1, err);
-        logf_("reconcile: %s", err);
+    /* check first: with vlan_filtering off the device may equal running and still not work */
+    if (!sw_ok || g.a->check(g.a, err, sizeof(err)) || g.a->read(g.a, &dev, err, sizeof(err))) {
+        if (set_health(1, err)) /* once, not every round */
+            logf_("reconcile: %s", err);
         goto unlock;
     }
-    if (!lsw_state_diff(&dev, &want, why, sizeof(why)))
+    if (!lsw_state_drift_text(&dev, &want, why, sizeof(why))) {
+        if (set_ok_if_degraded())
+            logf_("reconcile: device equals running, health ok");
         goto unlock;
+    }
     logf_("reconcile: device differs from running (%s), applying running", why);
     if (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err)) == LSW_TXN_OK) {
+        struct notif n = {.repaired = 1};
         pthread_mutex_lock(&g.lock);
-        g.repairs++;
+        n.repairs = ++g.repairs;
+        snprintf(n.text, sizeof(n.text), "%s", why);
+        notif_push(&n);
+        set_health_locked(0, NULL);
         pthread_mutex_unlock(&g.lock);
-        set_health(0, NULL);
         logf_("reconcile: ok");
     } else {
         set_health(1, err); /* the device still differs from running */
@@ -521,8 +641,10 @@ int main(int argc, char **argv)
     struct lsw_routes *rwant = NULL;
     int route_fail_at = 0;
     sr_conn_ctx_t *conn = NULL;
-    sr_session_ctx_t *sess = NULL;
+    sr_session_ctx_t *sess = NULL, *nsess = NULL;
     sr_subscription_ctx_t *sub = NULL;
+    pthread_t notif_thread;
+    int notif_started = 0;
     sigset_t sigs;
     uint32_t prio = 0;
     int opt, rc = 1, sig, every = 0, deadline = 3000;
@@ -584,10 +706,17 @@ int main(int argc, char **argv)
     sigaddset(&sigs, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &sigs, NULL); /* before sysrepo starts its threads */
 
-    if ((rc = sr_connect(0, &conn)) || (rc = sr_session_start(conn, SR_DS_RUNNING, &sess))) {
+    if ((rc = sr_connect(0, &conn)) || (rc = sr_session_start(conn, SR_DS_RUNNING, &sess)) ||
+        (rc = sr_session_start(conn, SR_DS_RUNNING, &nsess))) {
         logf_("sysrepo: %s", sr_strerror(rc));
         goto end;
     }
+    /* before the subscriptions: ENABLED may already change health */
+    if ((rc = pthread_create(&notif_thread, NULL, notifier, nsess))) {
+        logf_("notifier thread: %s", strerror(rc));
+        goto end;
+    }
+    notif_started = 1;
     if ((rc = sr_oper_get_subscribe(sess, MODULE, "/" MODULE ":switch-state", on_oper, NULL, 0, &sub))) {
         logf_("oper subscribe: %s", sr_strerror(rc));
         goto end;
@@ -616,6 +745,13 @@ int main(int argc, char **argv)
     rc = 0;
 end:
     sr_unsubscribe(sub);
+    if (notif_started) {
+        pthread_mutex_lock(&nq.lock);
+        nq.stop = 1;
+        pthread_cond_signal(&nq.cond);
+        pthread_mutex_unlock(&nq.lock);
+        pthread_join(notif_thread, NULL);
+    }
     sr_disconnect(conn);
     g.a->destroy(g.a);
     routes_cleanup();

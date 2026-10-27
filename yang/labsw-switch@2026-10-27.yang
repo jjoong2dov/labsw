@@ -11,6 +11,10 @@ module labsw-switch {
      Every port of the bridge is owned by this model: a port that is
      not listed under /switch/port has no VLAN at all.";
 
+  revision 2026-10-27 {
+    description
+      "Notifications health-changed and repaired.";
+  }
   revision 2026-10-26 {
     description
       "Initial revision.";
@@ -105,7 +109,8 @@ module labsw-switch {
         enum degraded {
           description
             "The last change failed and the previous state could not
-             be restored completely.";
+             be restored completely, or the bridge cannot be managed
+             now (for example vlan_filtering is off).";
         }
       }
     }
@@ -130,6 +135,43 @@ module labsw-switch {
         }
         uses port-vlan;
       }
+    }
+  }
+
+  notification health-changed {
+    description
+      "/switch-state/health changed.";
+    leaf health {
+      type enumeration {
+        enum ok;
+        enum degraded;
+      }
+      description
+        "The new value of /switch-state/health.";
+    }
+    leaf reason {
+      type string;
+      description
+        "Why the agent became degraded (the error). Not sent when
+         health becomes ok.";
+    }
+  }
+
+  notification repaired {
+    description
+      "The periodic reconcile (labswd -R) found the bridge different
+       from running (changed outside NETCONF) and put running back.";
+    leaf repairs {
+      type uint64;
+      description
+        "/switch-state/repairs after this repair.";
+    }
+    leaf difference {
+      type string;
+      description
+        "The first difference found, with port name and VLAN, e.g.
+         'port p3: VLAN 99 (tagged) is on the device but not in
+         running'.";
     }
   }
 }

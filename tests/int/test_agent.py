@@ -46,7 +46,7 @@ def test_capability_and_schema(lab):
         # a YANG 1.1 module is not listed in <hello> (RFC 7950 5.6.4), only in the YANG library
         assert not [c for c in m.server_capabilities if NS in c]
         lib = m.get(filter=("subtree", '<yang-library xmlns="urn:ietf:params:xml:ns:yang:ietf-yang-library"/>')).data_xml
-        assert "<name>labsw-switch</name>" in lib and "<revision>2026-10-26</revision>" in lib
+        assert "<name>labsw-switch</name>" in lib and "<revision>2026-10-27</revision>" in lib
         assert "module labsw-switch" in m.get_schema("labsw-switch").data
 
 
@@ -240,6 +240,45 @@ def test_reconcile_cannot_repair_filtering_off(lab):
         assert "vlan_filtering is off" in oper_leaf(m, "last-error")
         lab.dev.set_filtering(True)
         wait_for(lambda: oper_leaf(m, "health") == "ok", "health ok again", timeout=30)
+    assert lab.ports() == ACCESS10_DEV
+
+
+def next_notif(m, timeout=30.0):
+    """(name, {leaf: text}) of the next labsw-switch notification, None if none came;
+    others on the NETCONF stream (e.g. netconf-config-change) are skipped"""
+    end = time.monotonic() + timeout
+    while (left := end - time.monotonic()) > 0:
+        n = m.take_notification(block=True, timeout=left)
+        if n is None:
+            return None
+        for e in n.notification_ele:
+            if e.tag.startswith(f"{{{NS}}}"):
+                return e.tag.split("}")[1], {c.tag.split("}")[1]: c.text for c in e}
+    return None
+
+
+def test_notifications_repaired_and_health(lab):
+    lab.start_agent(every=1)
+    with lab.nc() as m:
+        edit(m, ACCESS10)
+        m.create_subscription()
+        lab.dev.set_ports({"p3": {99: (False, False)}})
+        n = next_notif(m)
+        assert n == ("repaired", {"repairs": "1",
+                                  "difference": "port p3: VLAN 99 (tagged) is on the device but not in running"})
+        assert oper_leaf(m, "repairs") == "1"
+        assert lab.ports() == ACCESS10_DEV
+
+        lab.dev.set_filtering(False)
+        name, leaves = next_notif(m)
+        assert (name, leaves["health"]) == ("health-changed", "degraded")
+        assert "vlan_filtering" in leaves["reason"]
+        assert oper_leaf(m, "health") == "degraded"
+
+        lab.dev.set_filtering(True)
+        assert next_notif(m) == ("health-changed", {"health": "ok"})
+        assert oper_leaf(m, "health") == "ok"
+        assert next_notif(m, timeout=2.5) is None  # sent once per change, not every round
     assert lab.ports() == ACCESS10_DEV
 
 

@@ -34,7 +34,7 @@ install(DIRECTORY yang/ DESTINATION share/yang/modules/labsw FILES_MATCHING PATT
 if(LABSW_TESTING)
   enable_testing()
   pkg_check_modules(CMOCKA REQUIRED cmocka)
-  foreach(t plan mock txn bridge_parse exec route)
+  foreach(t plan state mock txn bridge_parse exec route)
     add_executable(test_${t} tests/unit/test_${t}.c)
     target_include_directories(test_${t} PRIVATE agent ${CMOCKA_INCLUDE_DIRS})
     target_link_libraries(test_${t} labsw_core ${CMOCKA_LINK_LIBRARIES})

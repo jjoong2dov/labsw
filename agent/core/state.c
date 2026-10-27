@@ -83,7 +83,8 @@ void lsw_port_text(const struct lsw_port *p, char *buf, size_t len)
     }
 }
 
-static int diff_port(const struct lsw_port *a, const struct lsw_port *b, const char *name, char *why, size_t len)
+/* first vid where the two ports differ (a missing port has no VLANs), or 0 */
+static int diff_vid(const struct lsw_port *a, const struct lsw_port *b)
 {
     static const struct lsw_port empty;
 
@@ -91,23 +92,67 @@ static int diff_port(const struct lsw_port *a, const struct lsw_port *b, const c
         a = &empty;
     if (!b)
         b = &empty;
-    for (int v = 1; v <= LSW_VID_MAX; v++) {
-        if (a->vid[v] != b->vid[v]) {
-            snprintf(why, len, "port %s vid %d: flags 0x%x != 0x%x", name, v, a->vid[v], b->vid[v]);
+    for (int v = 1; v <= LSW_VID_MAX; v++)
+        if (a->vid[v] != b->vid[v])
+            return v;
+    return 0;
+}
+
+/* first difference as port name and vid; 0 if equal */
+static int first_diff(const struct lsw_state *a, const struct lsw_state *b, const char **name, int *vid)
+{
+    for (int i = 0; i < a->nports; i++)
+        if ((*vid = diff_vid(&a->port[i], lsw_state_find(b, a->port[i].name)))) {
+            *name = a->port[i].name;
             return 1;
         }
-    }
+    for (int i = 0; i < b->nports; i++)
+        if (!lsw_state_find(a, b->port[i].name) && (*vid = diff_vid(NULL, &b->port[i]))) {
+            *name = b->port[i].name;
+            return 1;
+        }
     return 0;
+}
+
+static uint8_t flags_of(const struct lsw_state *s, const char *name, int vid)
+{
+    const struct lsw_port *p = lsw_state_find(s, name);
+    return p ? p->vid[vid] : 0;
 }
 
 int lsw_state_diff(const struct lsw_state *a, const struct lsw_state *b, char *why, size_t len)
 {
-    /* a port missing on one side compares as a port without VLANs */
-    for (int i = 0; i < a->nports; i++)
-        if (diff_port(&a->port[i], lsw_state_find(b, a->port[i].name), a->port[i].name, why, len))
-            return 1;
-    for (int i = 0; i < b->nports; i++)
-        if (!lsw_state_find(a, b->port[i].name) && diff_port(NULL, &b->port[i], b->port[i].name, why, len))
-            return 1;
-    return 0;
+    const char *name;
+    int vid;
+
+    if (!first_diff(a, b, &name, &vid))
+        return 0;
+    snprintf(why, len, "port %s vid %d: flags 0x%x != 0x%x", name, vid, flags_of(a, name, vid), flags_of(b, name, vid));
+    return 1;
+}
+
+static const char *flags_text(uint8_t f)
+{
+    return f & LSW_F_PVID ? (f & LSW_F_UNTAGGED ? "pvid, untagged" : "pvid, tagged")
+                          : (f & LSW_F_UNTAGGED ? "untagged" : "tagged");
+}
+
+int lsw_state_drift_text(const struct lsw_state *dev, const struct lsw_state *want, char *buf, size_t len)
+{
+    const char *name;
+    uint8_t d, w;
+    int vid;
+
+    if (!first_diff(dev, want, &name, &vid))
+        return 0;
+    d = flags_of(dev, name, vid);
+    w = flags_of(want, name, vid);
+    if (!w)
+        snprintf(buf, len, "port %s: VLAN %d (%s) is on the device but not in running", name, vid, flags_text(d));
+    else if (!d)
+        snprintf(buf, len, "port %s: VLAN %d (%s) is in running but not on the device", name, vid, flags_text(w));
+    else
+        snprintf(buf, len, "port %s: VLAN %d is %s on the device but %s in running", name, vid, flags_text(d),
+                 flags_text(w));
+    return 1;
 }
