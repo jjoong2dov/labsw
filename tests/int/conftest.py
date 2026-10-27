@@ -78,9 +78,15 @@ def free_port():
 
 
 def children(pid):
+    """running children (a child that has exited stays a zombie until the stopped parent reaps it)"""
     kids = []
     for t in Path(f"/proc/{pid}/task").glob("*/children"):
-        kids += t.read_text().split()
+        for k in t.read_text().split():
+            try:
+                if Path(f"/proc/{k}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z":
+                    kids.append(k)
+            except (FileNotFoundError, IndexError):
+                pass
     return kids
 
 
@@ -362,9 +368,18 @@ class Lab:
         if p is None or p.poll() is not None:
             yield
             return
-        p.send_signal(signal.SIGSTOP)
+        for _ in range(20):
+            p.send_signal(signal.SIGSTOP)
+            end = time.monotonic() + 2
+            while children(p.pid) and time.monotonic() < end:
+                time.sleep(0.05)
+            if not children(p.pid):
+                break
+            p.send_signal(signal.SIGCONT)  # a command waiting on the stopped agent: let it go on
+            time.sleep(0.2)
+        else:
+            raise TimeoutError("labswd keeps running commands")
         try:
-            wait_for(lambda: not children(p.pid), "labswd's commands to finish")
             yield
         finally:
             p.send_signal(signal.SIGCONT)
