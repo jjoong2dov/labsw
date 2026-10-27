@@ -78,7 +78,7 @@ static int write_atomic(const char *name, const char *buf, size_t len, char *err
         limit = (size_t)o.fail_after;
     unlink(tmp); /* left by a crash */
     if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600)) < 0) {
-        snprintf(err, errlen, "backup %s: cannot create %s: %s", name, tmp, strerror(errno));
+        snprintf(err, errlen, "backup %s: cannot create %.512s: %s", name, tmp, strerror(errno));
         return -1;
     }
     while (done < limit) {

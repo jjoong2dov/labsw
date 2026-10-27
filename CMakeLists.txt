@@ -6,6 +6,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 add_compile_options(-Wall -Wextra -Werror=implicit-function-declaration)
 
 option(LABSW_TESTING "Build the mock adapter, fault injection and unit tests" OFF)
+option(LABSW_ASAN "Build with AddressSanitizer + UndefinedBehaviorSanitizer (tests only)" OFF)
+if(LABSW_ASAN)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=address,undefined)
+endif()
 set(LABSW_BRIDGE_BIN "/usr/sbin/bridge" CACHE STRING "bridge (iproute2) used by the agent")
 set(LABSW_IP_BIN "/usr/sbin/ip" CACHE STRING "ip (iproute2) used by the agent")
 

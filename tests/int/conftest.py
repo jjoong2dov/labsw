@@ -334,6 +334,10 @@ class Lab:
     def teardown(self):
         for name in list(self.procs):
             self.stop(name)
+        # a build with LABSW_ASAN=ON reports memory errors and leaks when it exits
+        for name in ("labswd", "reject_sub"):
+            if "Sanitizer" in self.log(name):
+                self.sanitizer_report = self.log(name)
         self.dev.teardown()
         for f in Path("/dev/shm").glob(self.prefix + "*"):
             f.unlink(missing_ok=True)
@@ -369,5 +373,7 @@ def lab(tmp_path_factory):
         yield lab
     finally:
         lab.teardown()
+        if getattr(lab, "sanitizer_report", None):
+            pytest.fail("sanitizer report in the agent's log:\n" + lab.sanitizer_report[-4000:])
         if os.environ.get("LABSW_KEEP") != "1":
             shutil.rmtree(base / "repo", ignore_errors=True)
