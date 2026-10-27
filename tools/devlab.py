@@ -109,8 +109,9 @@ def start(a):
     if listening(port):
         sys.exit(f"devlab: something already listens on 127.0.0.1:{port}")
     log = open(d / "netopeer2.log", "a")
-    # -d: stay in the foreground, log to stdout (it then writes no pid file itself)
-    np2 = subprocess.Popen(["netopeer2-server", "-d", "-v1", "-f", str(d / "np2")],
+    # -d: stay in the foreground, log to stdout. -p is needed (the default is under /var/run)
+    # but with -d the server does not write it, so the pid is kept here
+    np2 = subprocess.Popen(["netopeer2-server", "-d", "-v1", "-p", str(d / "np2.pid"), "-f", str(d / "np2")],
                            env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     (d / "netopeer2.pid").write_text(str(np2.pid))
     for _ in range(100):

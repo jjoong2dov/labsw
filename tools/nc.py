@@ -4,13 +4,16 @@
   hello                      session id, NETCONF capabilities and the YANG modules of the server
   get-config [FILTER]        <get-config> of running (or --source startup|candidate)
   get [FILTER]               <get>: configuration and state
-  edit FILE|-                <edit-config> to running with the <config> in FILE (- = stdin);
-                             FILE may hold just the inside of <config>
+  edit FILE|-                <edit-config> to running (or --target candidate) with the <config> in
+                             FILE (- = stdin); FILE may hold just the inside of <config>.
+                             --default-operation merge|replace|none
   copy SOURCE TARGET         <copy-config>, e.g. copy running startup
+  commit / discard           <commit> / <discard-changes> of the candidate
   rpc FILE|-                 any RPC: the XML of its element, e.g. <backup xmlns="urn:example:labsw-ops">...
   listen [SECONDS]           <create-subscription>, then print notifications (default 60 s)
 
 FILTER is a subtree filter, e.g. '<switch xmlns="urn:example:labsw-switch"/>'.
+--with-defaults report-all|trim|explicit|report-all-tagged for get and get-config (RFC 6243).
 Connection: --host/--port/--user/--key, default the devlab of this user
 (127.0.0.1, the port and key in ~/.labsw-devlab). Errors are printed as the server sent them.
 SPDX-License-Identifier: MIT
@@ -47,7 +50,8 @@ def pretty(xml):
 def main():
     devlab = Path(os.environ.get("LABSW_DEVLAB", Path.home() / ".labsw-devlab"))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["hello", "get-config", "get", "edit", "copy", "rpc", "listen"])
+    ap.add_argument("command", choices=["hello", "get-config", "get", "edit", "copy", "commit", "discard", "rpc",
+                                        "listen"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int,
@@ -55,7 +59,10 @@ def main():
     ap.add_argument("--user", default=getpass.getuser())
     ap.add_argument("--key", default=str(devlab / "client_key"))
     ap.add_argument("--source", default="running")
-    a = ap.parse_args()
+    ap.add_argument("--target", default="running")
+    ap.add_argument("--default-operation", choices=["merge", "replace", "none"])
+    ap.add_argument("--with-defaults", choices=["report-all", "trim", "explicit", "report-all-tagged"])
+    a = ap.parse_intermixed_args()  # options may come after the command
 
     # password="": ncclient 0.6.x fails on None when it falls back to password authentication
     m = manager.connect(host=a.host, port=a.port, username=a.user, password="", key_filename=a.key,
@@ -76,15 +83,20 @@ def main():
                     print(f"  {name}@{rev}")
         elif a.command in ("get-config", "get"):
             flt = ("subtree", a.args[0]) if a.args else None
-            r = m.get_config(a.source, filter=flt) if a.command == "get-config" else m.get(filter=flt)
+            wd = {"with_defaults": a.with_defaults} if a.with_defaults else {}
+            r = m.get_config(a.source, filter=flt, **wd) if a.command == "get-config" else m.get(filter=flt, **wd)
             print(pretty(r.data_xml))
         elif a.command == "edit":
             body = read(a.args[0])
             if not body.startswith("<config"):
                 body = f'<config xmlns="{NC}">{body}</config>'
-            print(pretty(m.edit_config(target="running", config=body).xml))
+            print(pretty(m.edit_config(target=a.target, config=body, default_operation=a.default_operation).xml))
         elif a.command == "copy":
             print(pretty(m.copy_config(source=a.args[0], target=a.args[1]).xml))
+        elif a.command == "commit":
+            print(pretty(m.commit().xml))
+        elif a.command == "discard":
+            print(pretty(m.discard_changes().xml))
         elif a.command == "rpc":
             print(pretty(m.dispatch(to_ele(read(a.args[0]))).xml))
         elif a.command == "listen":
