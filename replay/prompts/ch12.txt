@@ -1,0 +1,13 @@
+labsw-switch 에 NETCONF 알림(notification) 두 가지를 넣어 주세요. 운영자가 create-subscription 으로 구독해 장비 상태 변화를 바로 알 수 있게 하려는 것입니다.
+
+요구사항:
+1. YANG: labsw-switch 의 새 revision 2026-10-27 (파일 이름도 labsw-switch@2026-10-27.yang 으로).
+   - notification health-changed { leaf health (ok | degraded); leaf reason (string) }
+     switch-state/health 가 바뀔 때 보냅니다. reason 은 degraded 가 된 이유(오류 문구)입니다.
+   - notification repaired { leaf repairs (uint64); leaf difference (string) }
+     -R 주기 재조정이 NETCONF 밖에서 바뀐 장비를 running 으로 되돌렸을 때 보냅니다. repairs 는 그 뒤의
+     switch-state/repairs 값, difference 는 처음 찾은 차이를 운영자가 읽을 수 있는 문장으로(포트 이름과 VLAN 번호가 들어가게).
+2. -R 로 돌 때 bridge 의 vlan_filtering 이 꺼진 것을 발견하면 health 가 degraded 가 되고(reason 에 vlan_filtering 이라는 말이 들어가게)
+   health-changed 를 보내야 합니다. 다시 켜지고 장비가 running 과 같으면 ok 로 돌아오며 다시 health-changed 를 보냅니다.
+3. 통합 시험(tests/int)을 추가해 주세요: ncclient 로 구독 → 장비를 몰래 바꿈 → repaired, vlan_filtering 끔 → degraded, 켬 → ok.
+4. 단위 시험과 통합 시험이 모두 통과해야 합니다. 끝나면 커밋하고, 무엇을 했고 무엇을 확인했는지 짧게 보고해 주세요.

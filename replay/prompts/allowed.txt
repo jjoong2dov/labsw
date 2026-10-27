@@ -1,0 +1,1 @@
+Bash(cmake:*),Bash(ctest:*),Bash(python3:*),Bash(yanglint:*),Bash(sysrepoctl:*),Bash(sysrepocfg:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git add:*),Bash(git commit:*),Bash(git mv:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(find:*),Bash(wc:*),Bash(cd:*),Bash(chmod:*),Bash(bash -n:*),Bash(./tools/:*),Bash(tools/:*)

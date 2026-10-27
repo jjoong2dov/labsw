@@ -1,0 +1,16 @@
+labswd 에 설정 백업·복원 RPC 를 넣어 주세요. 운영자가 NETCONF 로 지금 설정을 장비 안 파일에 저장해 두었다가 되돌릴 수 있게 하려는 것입니다.
+
+요구사항:
+1. 새 YANG 모듈 labsw-ops (revision 2026-10-27, namespace urn:example:labsw-ops, prefix lops)
+   - rpc backup { input: leaf name (mandatory); output: leaf bytes (uint64, 저장한 파일 크기) }
+   - rpc restore { input: leaf name (mandatory) }
+   - name 은 1~32자, 디렉터리 밖을 가리킬 수 없어야 합니다(예: "../x" 는 거부).
+2. 대상은 running 의 labsw-switch 와 labsw-route 둘 다입니다. 백업 파일은 <백업 디렉터리>/<name>.json 입니다.
+   백업 디렉터리는 labswd 의 새 옵션 -B dir (기본 /var/lib/labsw/backup).
+3. 백업은 원자적이어야 합니다: 쓰다가 실패하거나 전원이 나가도 같은 이름의 이전 백업이 깨지면 안 되고, 반쯤 쓴 파일이 남으면 안 됩니다.
+   시험 빌드(LABSW_TESTING)에 -K n 옵션: 백업 파일 쓰기가 n 바이트 뒤 실패하게 (결함 주입).
+4. 복원은 두 모듈을 한 트랜잭션으로 바꿉니다. 파일이 없거나, 깨졌거나, 다른 모듈의 데이터가 들어 있거나, 에이전트가 장비에 적용하지 못하면
+   (예: 없는 포트, 경로 적용 실패) RPC 는 오류를 돌려주고 running 과 장비는 복원 전 그대로여야 합니다.
+   백업에 한 모듈이 없으면 그 모듈은 비웁니다.
+5. 통합 시험(tests/int)을 추가해 주세요. 위 실패 경우들을 포함해서요.
+6. 단위 시험과 통합 시험이 모두 통과해야 합니다. 끝나면 커밋하고, 무엇을 했고 무엇을 확인했는지 짧게 보고해 주세요.
