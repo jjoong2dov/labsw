@@ -141,7 +141,7 @@ def test_failure_at_each_step_restores_device(lab, fail_at):
 @pytest.mark.parametrize("agent_prio", [10, 0], ids=["agent-first", "same-priority"])
 def test_abort_from_other_subscriber_restores_device(lab, agent_prio):
     """agent-first: sysrepo sends ABORT after the rejector (priority 0) fails.
-    same-priority: both run at once; sysrepo 5.1.0 makes the ABORT itself and
+    same-priority: both run at once; sysrepo (5.1.0, still 5.2.27) makes the ABORT itself and
     gives it the request id instead of the operation id."""
     lab.start_agent(prio=agent_prio)
     lab.start_rejector()

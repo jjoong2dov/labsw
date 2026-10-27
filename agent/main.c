@@ -284,7 +284,7 @@ static int pending_new(uint32_t op_id)
 }
 
 /*
- * sysrepo 5.1.0 passes the request id, not the operation id, to an ABORT it
+ * sysrepo (5.1.0, still 5.2.27) passes the request id, not the operation id, to an ABORT it
  * makes itself (a subscriber of the same priority failed; shm_sub.c). Then the
  * ABORT names no open change. Take the only open change, but only if the device
  * still has exactly what that change applied; otherwise say we do not know.

@@ -9,7 +9,7 @@
 - 시험: 단위(cmocka), 통합(pytest + ncclient, 실제 sysrepo·netopeer2 + 가짜 장비 또는 실제 브리지), 장시간 시험, 결함 주입
 - 도구: 스택 빌드(`tools/build_stack.sh`), 크로스 빌드·배포 묶음(`tools/xbuild.sh`, `tools/pkg.sh`, `deploy/install.sh`), 장비별 시험(`tools/verify`), 스키마 업그레이드(`tools/labsw-upgrade`), PC 에서 갖고 노는 장비(`tools/devlab.py`, `tools/nc.py`)
 
-NETCONF 스택은 `deps.lock` 의 버전으로 고정합니다: libyang 5.8.6, libnetconf2 4.4.10, sysrepo 5.1.0, netopeer2 2.8.7.
+NETCONF 스택은 `deps.lock` 의 버전으로 고정합니다: libyang 6.4.13, libnetconf2 4.6.4, sysrepo 5.2.27, netopeer2 2.8.21 (2026-10-27 에 libyang 보안 권고 GHSA-hr48-qwgp-86fx 로 올림, 이유는 `deps.lock` 머리 주석).
 
 ## PC 에서 시작하기 (root 없이)
 

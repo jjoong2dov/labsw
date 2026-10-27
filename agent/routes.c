@@ -138,7 +138,7 @@ static int pending_new(uint32_t op_id)
     return -1;
 }
 
-/* see pending_for_abort() in main.c (sysrepo 5.1.0 self-generated ABORT) */
+/* see pending_for_abort() in main.c (sysrepo 5.x self-generated ABORT) */
 static int pending_for_abort(uint32_t op_id)
 {
     struct lsw_routes *now;

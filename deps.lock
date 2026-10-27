@@ -1,6 +1,11 @@
 # The NETCONF stack labsw is built and tested with (tools/build_stack.sh reads this).
+# 2026-10-27: libyang v5.8.6 -> v6.4.13 (GHSA-hr48-qwgp-86fx: two memory-safety bugs in the
+# XPath engine, <= 5.8.6, fixed in 6.2.10; XPath is reachable from any NETCONF filter), and
+# with it libnetconf2 v4.4.10 -> v4.6.4, sysrepo v5.1.0 -> v5.2.27 (their libyang minimum) and
+# netopeer2 v2.8.7 -> 2.8.21 (2.8.7 does not build with libyang 6: LY_ARRAY_COUNT_TYPE is gone;
+# netopeer2 tags have no "v" since 2.8.8)
 # name         repository                                   tag      commit                                     license
-libyang        https://github.com/CESNET/libyang.git         v5.8.6   47351e59e2965e350f9d4098f15ecbe6b3850f6f   BSD-3-Clause
-libnetconf2    https://github.com/CESNET/libnetconf2.git     v4.4.10  2add91c6f2e5864463922aa27293f8956ee9cbbe   BSD-3-Clause
-sysrepo        https://github.com/sysrepo/sysrepo.git        v5.1.0   e92dd4fced5a91b0ae4f7edb20ade978b5f64f91   BSD-3-Clause
-netopeer2      https://github.com/CESNET/netopeer2.git       v2.8.7   5be28a93e783b41d1c284c1275c9b24237d0454d   BSD-3-Clause
+libyang        https://github.com/CESNET/libyang.git         v6.4.13  f7e0cc1bc99ec9280af1010a94ba8dd8ef448f6d   BSD-3-Clause
+libnetconf2    https://github.com/CESNET/libnetconf2.git     v4.6.4   f191449dd20f792479fe95dbc10db41b4845efbf   BSD-3-Clause
+sysrepo        https://github.com/sysrepo/sysrepo.git        v5.2.27  fe58e2b46f617bd4e13ce986cd54db6e418f3bcf   BSD-3-Clause
+netopeer2      https://github.com/CESNET/netopeer2.git       2.8.21   92e18139e996fe9333f441e3521d514b0d5282d9   BSD-3-Clause

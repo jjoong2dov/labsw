@@ -16,7 +16,7 @@ labsw: 라즈베리 파이 4 의 Linux bridge(br0)와 FRR 을 "작은 L2/L3 장�
 
 ## 빌드와 시험 (PC, root 없이)
 
-스택(libyang 5.8.6 / libnetconf2 4.4.10 / sysrepo 5.1.0 / netopeer2 2.8.7)이 `$LABSW_PREFIX`(기본 `~/opt/labsw-host`)에 설치되어 있고, 그 bin·lib 이 PATH·LD_LIBRARY_PATH·PKG_CONFIG_PATH 에 들어 있어야 한다.
+스택(libyang 6.4.13 / libnetconf2 4.6.4 / sysrepo 5.2.27 / netopeer2 2.8.21, `deps.lock`)이 `$LABSW_PREFIX`(기본 `~/opt/labsw-host`)에 설치되어 있고, 그 bin·lib 이 PATH·LD_LIBRARY_PATH·PKG_CONFIG_PATH 에 들어 있어야 한다.
 
 ```
 cmake -S . -B build -DLABSW_TESTING=ON && cmake --build build -j

@@ -2,7 +2,7 @@
 """labsw-upgrade-check NEW.yang... : rehearse `sysrepoctl -U` on a copy of the sysrepo
 repository and report configuration the upgrade would refuse or silently drop.
 
-Why: sysrepo 5.1.0 refuses an update whose new schema rejects the stored data
+Why: sysrepo (5.1.0, 5.2.27) refuses an update whose new schema rejects the stored data
 (e.g. a shorter length, a new mandatory leaf), but a REMOVED node is dropped from
 running and startup without a word, and -U cannot go back to an older revision.
 

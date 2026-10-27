@@ -22,23 +22,33 @@ case $mode in
   host)
     prefix=$(realpath -m "${2:-$HOME/opt/labsw-host}")
     # /etc/sysrepo (the default) needs root. The shared memory prefix cannot be set here
-    # (sysrepo 5.1.0 has it fixed to "sr"; cmake warns that SHM_PREFIX is not used): set
+    # (sysrepo has it fixed to "sr"; cmake warns that SHM_PREFIX is not used): set
     # SYSREPO_SHM_PREFIX when running, as tools/devlab.py and the tests do, or this repository
-    # and a system sysrepo would meet in /dev/shm ("Shared memory repository path mismatch")
+    # and a system sysrepo would meet in /dev/shm ("Shared memory repository path mismatch").
+    # REPO_SHM_SETUP=OFF for the same reason: it runs sysrepoctl at install, without the prefix
     opts=(-DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_PREFIX_PATH="$prefix" -DREPO_PATH="$prefix/var/sysrepo"
-          -DNOTIFD_SETUP=OFF -DSYSREPO_SETUP=OFF)
+          -DNOTIFD_SETUP=OFF -DSYSREPO_SETUP=OFF -DREPO_SHM_SETUP=OFF)
     export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     destdir=;;
   aarch64)
     stage=$(realpath -m "${2:?usage: build_stack.sh aarch64 STAGE}"); prefix=/opt/labsw
     : "${XB_SYSROOT:?set XB_SYSROOT to a copy of the device root}"
     export XB_SYSROOT=$(realpath "$XB_SYSROOT") XB_STAGE=$stage
+    # the sysroot's opt/labsw must be THIS stage: a link left to an older stage (xbuild.sh
+    # makes one) lets cmake find the old libraries first
+    mkdir -p "$XB_SYSROOT/opt" "$stage$prefix"
+    if [ "$(readlink "$XB_SYSROOT/opt/labsw" 2>/dev/null)" != "$stage$prefix" ]; then
+      [ -L "$XB_SYSROOT/opt/labsw" ] && rm "$XB_SYSROOT/opt/labsw"
+      [ -e "$XB_SYSROOT/opt/labsw" ] && { echo "build_stack.sh: $XB_SYSROOT/opt/labsw is not a link, move it away" >&2; exit 1; }
+      ln -s "$stage$prefix" "$XB_SYSROOT/opt/labsw"
+    fi
     export PKG_CONFIG=pkgconf PKG_CONFIG_SYSROOT_DIR=$XB_SYSROOT
     export PKG_CONFIG_LIBDIR=$XB_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig:$XB_SYSROOT/usr/share/pkgconfig
     export PKG_CONFIG_PATH=$stage$prefix/lib/pkgconfig
-    # the module setup runs sysrepoctl, an aarch64 program: do it on the device (deploy/install.sh)
+    # the module and repository setup runs sysrepoctl, an aarch64 program: do it on the device
+    # (deploy/install.sh). REPO_SHM_SETUP is new in sysrepo 5.2 and on by default
     opts=(-DCMAKE_TOOLCHAIN_FILE="$here/cmake/aarch64.cmake" -DCMAKE_INSTALL_PREFIX=$prefix -DCMAKE_PREFIX_PATH=$prefix
-          -DNOTIFD_SETUP=OFF -DSYSREPO_SETUP=OFF)
+          -DNOTIFD_SETUP=OFF -DSYSREPO_SETUP=OFF -DREPO_SHM_SETUP=OFF)
     destdir=$stage;;
   *) echo "build_stack.sh: mode is host or aarch64" >&2; exit 2;;
 esac
