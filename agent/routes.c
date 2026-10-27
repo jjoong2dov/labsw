@@ -77,8 +77,9 @@ void routes_cleanup(void)
     }
 }
 
-/* /labsw-route:routes of the session's view; a prefix with host bits is
- * rejected with its path (inet:ipv4-prefix allows them) */
+/* /labsw-route:routes of the session's view. libyang already stores a prefix
+ * with host bits in canonical form (198.51.100.77/24 -> 198.51.100.0/24); the
+ * check here only guards against a value that bypassed that */
 static int read_wanted(sr_session_ctx_t *sess, struct lsw_routes *want, char *err, size_t len)
 {
     sr_data_t *data = NULL;
