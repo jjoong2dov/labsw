@@ -63,13 +63,18 @@ def env_for(d):
                 LD_LIBRARY_PATH=f"{PREFIX}/lib:" + os.environ.get("LD_LIBRARY_PATH", ""))
 
 
-def pid_alive(f):
+def pid_alive(f, program):
+    """the pid in f if that process is still `program`: a pid file outlives its
+    process, and the number may belong to some other process by now"""
     try:
         pid = int(f.read_text())
-        os.kill(pid, 0)
-        return pid
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[0]
+        return pid if os.path.basename(cmd).decode() == program else None
     except (OSError, ValueError):
         return None
+
+
+PROGRAM = {"netopeer2": "netopeer2-server", "labswd": "labswd"}
 
 
 def listening(port):
@@ -82,7 +87,7 @@ def listening(port):
 
 def start(a):
     d = a.dir
-    if pid_alive(d / "netopeer2.pid") or pid_alive(d / "labswd.pid"):
+    if any(pid_alive(d / f"{n}.pid", prog) for n, prog in PROGRAM.items()):
         sys.exit(f"devlab: already running in {d} (devlab.py stop first)")
     for need in (REPO / "build/labswd", PREFIX / "sbin/netopeer2-server"):
         if not need.exists():
@@ -119,6 +124,7 @@ def start(a):
             break
         time.sleep(0.1)
     else:
+        stop(a)
         sys.exit(f"devlab: netopeer2-server did not start, see {d / 'netopeer2.log'}")
     log = open(d / "labswd.log", "a")
     p = subprocess.Popen([str(REPO / "build/labswd"), "-a", "mock", "-m", str(d / "device.json"),
@@ -130,6 +136,7 @@ def start(a):
         if "labswd: running" in (d / "labswd.log").read_text(errors="replace").split("signal")[-1]:
             break
         if p.poll() is not None:
+            stop(a)
             sys.exit(f"devlab: labswd exited, see {d / 'labswd.log'}")
         time.sleep(0.1)
     print(f"devlab: NETCONF on 127.0.0.1:{port}, user {getpass.getuser()}, key {d / 'client_key'}")
@@ -140,7 +147,7 @@ def start(a):
 def stop(a):
     d = a.dir
     for name in ("labswd", "netopeer2"):
-        pid = pid_alive(d / f"{name}.pid")
+        pid = pid_alive(d / f"{name}.pid", PROGRAM[name])
         if pid:
             os.kill(pid, signal.SIGTERM)
             for _ in range(100):
@@ -158,7 +165,7 @@ def stop(a):
 def status(a):
     d = a.dir
     for name in ("netopeer2", "labswd"):
-        pid = pid_alive(d / f"{name}.pid")
+        pid = pid_alive(d / f"{name}.pid", PROGRAM[name])
         print(f"{name}: {'running, pid ' + str(pid) if pid else 'not running'}")
 
 
