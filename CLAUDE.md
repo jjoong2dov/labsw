@@ -12,6 +12,7 @@ labsw: 라즈베리 파이 4 의 Linux bridge(br0)와 FRR 을 "작은 L2/L3 장�
   - `adapter/` 장비 쪽: `exec.c`(argv 실행기), `bridge.c`(iproute2 bridge/ip -j), `frr.c`(vtysh), `mock*.c`(JSON 파일로 흉내 낸 장비, 시험 빌드에만)
 - `tests/unit/` cmocka 단위 시험, `tests/int/` pytest+ncclient 통합 시험(실제 sysrepo·netopeer2 + 가짜 장비 또는 실제 bridge)
 - `tools/` verify(장비별 시험 실행·요약), xbuild.sh·pkg.sh(aarch64 묶음), lab_up/down.sh
+  - labsw-upgrade-check·labsw-upgrade(새 revision 을 저장소 사본에서 먼저 시험, 저장 후 -U, --rollback), labsw-dump.c(datastore 를 "경로 = 값" 줄로)
 - `deploy/` install.sh, systemd 유닛, NACM
 
 ## 빌드와 시험 (PC, root 없이)

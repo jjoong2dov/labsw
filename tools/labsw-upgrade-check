@@ -1,0 +1,63 @@
+#!/bin/bash
+# labsw-upgrade-check NEW.yang : what would `sysrepoctl -U NEW.yang` do to this device?
+#   exit 0  fine: accepted, running and startup keep every explicitly set value
+#   exit 2  sysrepo rejects it (its error is shown)
+#   exit 3  accepted, but values of running or startup are lost (shown per datastore)
+#   exit 1  cannot tell (usage, module not installed, ...)
+# The upgrade is tried on a copy of the repository (SYSREPO_REPOSITORY_PATH, default
+# /etc/sysrepo) with its own SHM prefix; the repository itself is only read.
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+me=labsw-upgrade-check
+here=$(cd "$(dirname "$0")" && pwd)
+[ -d /opt/labsw/bin ] && ! command -v sysrepoctl >/dev/null && PATH=/opt/labsw/bin:$PATH
+DUMP=${LABSW_DUMP:-$here/labsw-dump}
+[ -x "$DUMP" ] || DUMP=labsw-dump
+die() { echo "$me: $*" >&2; exit 1; }
+
+[ $# -eq 1 ] && [ -f "$1" ] || { echo "usage: $me NEW.yang" >&2; exit 1; }
+new=$(realpath "$1")
+name=$(sed -n 's/^[[:space:]]*module[[:space:]]\{1,\}\([A-Za-z0-9_.-]\{1,\}\).*/\1/p' "$new" | head -1)
+rev=$(sed -n 's/^[[:space:]]*revision[[:space:]]\{1,\}"\{0,1\}\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p' "$new" | head -1)
+[ -n "$name" ] && [ -n "$rev" ] || die "$new: no module name or revision"
+repo=$(realpath "${SYSREPO_REPOSITORY_PATH:-/etc/sysrepo}")
+export SYSREPO_REPOSITORY_PATH=$repo
+have=$(sysrepoctl -l | awk -F'|' -v n="$name" '{gsub(/ /,"",$1); gsub(/ /,"",$2)} $1==n {print $2}')
+[ -n "$have" ] || die "$name is not installed in $repo"
+echo "$name: $have -> $rev"
+if [ "$have" = "$rev" ]; then echo "already installed, nothing to do"; exit 0; fi
+
+t=$(mktemp -d "${TMPDIR:-/tmp}/labsw-upgrade-check.XXXXXX")   # mode 700: running has keys
+pfx=lswu$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+trap 'rm -rf "$t"; rm -f /dev/shm/"$pfx"*' EXIT
+
+# running lives in SHM, so both datastores are taken through sysrepo, not from files
+for ds in running startup; do
+  sysrepocfg --export="$t/$ds.json" -d $ds -f json -e explicit || die "cannot export $ds of $repo"
+  [ -s "$t/$ds.json" ] || echo '{}' > "$t/$ds.json"
+done
+cp -a "$repo" "$t/repo" || die "cannot copy $repo"
+
+export SYSREPO_REPOSITORY_PATH=$t/repo SYSREPO_SHM_PREFIX=$pfx
+for ds in startup running; do
+  sysrepocfg --import="$t/$ds.json" -d $ds -f json || die "cannot load $ds into the copy"
+  "$DUMP" $ds | LC_ALL=C sort > "$t/before.$ds"
+done
+if ! sysrepoctl -U "$new" -s "$(dirname "$new")" > "$t/err" 2>&1; then
+  echo "REJECTED: sysrepo refuses the upgrade:"
+  sed 's/^/  /' "$t/err"
+  exit 2
+fi
+lost=0
+for ds in running startup; do
+  "$DUMP" $ds | LC_ALL=C sort > "$t/after.$ds"
+  LC_ALL=C comm -23 "$t/before.$ds" "$t/after.$ds" > "$t/lost.$ds"
+  if [ -s "$t/lost.$ds" ]; then
+    [ $lost -eq 1 ] || echo "LOSS: the upgrade succeeds but these values are lost:"
+    lost=1
+    echo "$ds ($(wc -l < "$t/lost.$ds")):"
+    sed 's/^/  /' "$t/lost.$ds"
+  fi
+done
+[ $lost -eq 0 ] || exit 3
+echo "OK: running and startup keep every value"

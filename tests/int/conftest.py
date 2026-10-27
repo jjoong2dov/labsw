@@ -264,6 +264,13 @@ class Lab:
     def run(self, *argv, check=True):
         return subprocess.run(argv, env=self.env, check=check, capture_output=True, text=True)
 
+    def tool(self, name, *args):
+        """tools/<name> on this lab's repository; upgrade state under base/state"""
+        env = dict(self.env, LABSW_DUMP=str(BUILD / "labsw-dump"), LABSW_STATE=str(self.base / "state"),
+                   TMPDIR=str(self.base))
+        return subprocess.run([str(REPO / "tools" / name), *args], env=env, capture_output=True, text=True,
+                              timeout=180)
+
     def setup(self, ports=("p1", "p2", "p3")):
         self.run(str(REPO / "tests/int/mkrepo.sh"), str(self.base / "repo"))
         pub = KEY.with_suffix(".pub").read_text().split()[1]
@@ -355,7 +362,7 @@ class Lab:
 
 @pytest.fixture
 def lab(tmp_path_factory):
-    for need in (BUILD / "labswd", BUILD / "reject_sub", PREFIX / "sbin/netopeer2-server", KEY):
+    for need in (BUILD / "labswd", BUILD / "reject_sub", BUILD / "labsw-dump", PREFIX / "sbin/netopeer2-server", KEY):
         if not need.exists():
             pytest.skip(f"missing {need}")
     if TARGET == "bridge" and os.geteuid() != 0:

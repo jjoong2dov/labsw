@@ -1,0 +1,142 @@
+#!/bin/bash
+# labsw-upgrade NEW.yang [--allow-loss] : sysrepoctl -U NEW.yang, but only if
+#   labsw-upgrade-check says sysrepo accepts it and no value of running or startup
+#   is lost (--allow-loss: go on anyway). Before the upgrade it saves the installed
+#   module and both datastores to $LABSW_STATE/upgrade/<dir>; the last line printed
+#   is the command that goes back.
+# labsw-upgrade --rollback DIR : the module revision, running and startup of DIR
+#   again (whole datastores, as they were before the upgrade). Stop labswd first.
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+me=labsw-upgrade
+self=$(realpath "$0")
+here=$(dirname "$self")
+[ -d /opt/labsw/bin ] && ! command -v sysrepoctl >/dev/null && PATH=/opt/labsw/bin:$PATH
+DUMP=${LABSW_DUMP:-$here/labsw-dump}
+[ -x "$DUMP" ] || DUMP=labsw-dump
+repo=$(realpath "${SYSREPO_REPOSITORY_PATH:-/etc/sysrepo}")
+export SYSREPO_REPOSITORY_PATH=$repo
+die() { echo "$me: $*" >&2; exit 1; }
+usage() { echo "usage: $me NEW.yang [--allow-loss] | $me --rollback DIR" >&2; exit 1; }
+installed() { sysrepoctl -l | awk -F'|' -v n="$1" '{gsub(/ /,"",$1); gsub(/ /,"",$2)} $1==n {print $2}'; }
+meta() { sed -n "s/^$1=//p" "$dir/meta"; }
+
+# save running and startup as files to import, and as dump lines to compare with later
+save_ds() {
+  local ds
+  for ds in running startup; do
+    sysrepocfg --export="$1/$ds.json" -d $ds -f json -e explicit || return 1
+    [ -s "$1/$ds.json" ] || echo '{}' > "$1/$ds.json"
+    "$DUMP" $ds | LC_ALL=C sort > "$1/$ds.lines" || return 1
+  done
+}
+
+import_ds() {
+  local ds
+  for ds in startup running; do
+    sysrepocfg --import="$1/$ds.json" -d $ds -f json || return 1
+  done
+}
+
+# install YANG file $1 as module $name with the owner, permissions, features and
+# replay of the `sysrepoctl -l` line saved before the upgrade
+install_saved() {
+  local flags owner sperm rperm feats f args
+  IFS='|' read -r _ _ flags owner sperm rperm feats <<< "$(meta list)"
+  read -r owner <<< "$owner"; read -r sperm <<< "$sperm"; read -r rperm <<< "$rperm"
+  args=(-i "$1")
+  [ -z "$owner" ] || args+=(-o "${owner%%:*}" -g "${owner#*:}")
+  [ -z "$sperm" ] || args+=(-p "$sperm")
+  for f in $feats; do args+=(-e "$f"); done
+  sysrepoctl "${args[@]}" || return 1
+  [ -z "$rperm" ] || [ "$rperm" = "$sperm" ] || sysrepoctl -c "$name" -D running -p "$rperm" || return 1
+  case $flags in *R*) sysrepoctl -c "$name" -r on || return 1 ;; esac
+}
+
+rollback() {
+  dir=$(realpath "$1")
+  [ -f "$dir/meta" ] || die "$dir: not an upgrade directory (no meta)"
+  local old file now
+  name=$(meta module); old=$(meta old); file=$dir/$(meta file)
+  for f in "$file" "$dir"/{running,startup}.{json,lines}; do [ -f "$f" ] || die "$f missing"; done
+  now=$(installed "$name")
+  [ -n "$now" ] || die "$name is not installed"
+  t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+  if [ "$now" != "$old" ]; then
+    echo "$name: $now -> $old"
+    # sysrepo updates only to a newer revision: uninstall (drops the module's data,
+    # imported again below) and install the saved one. Keep what is there now to
+    # put it back if that fails.
+    cp "$repo/yang/$name@$now.yang" "$t/" || die "no $repo/yang/$name@$now.yang"
+    save_ds "$t" || die "cannot save running and startup; nothing was changed"
+    sysrepoctl -u "$name" || die "cannot uninstall $name@$now; nothing was changed"
+    if ! install_saved "$file"; then
+      echo "$me: cannot install $name@$old, putting $name@$now back" >&2
+      sysrepoctl -u "$name" >/dev/null 2>&1 || true
+      if ! { install_saved "$t/$name@$now.yang" && import_ds "$t"; }; then
+        mv "$t" "$dir/before-rollback"
+        die "$name@$now could not be put back either; its running and startup are in $dir/before-rollback"
+      fi
+      die "rollback failed, $name@$now and its data are as before the rollback"
+    fi
+  fi
+  import_ds "$dir" || die "$name is at $old, but cannot import the saved running and startup"
+  # read back: only a checked rollback is reported as done
+  [ "$(installed "$name")" = "$old" ] || die "$name is not at $old after the rollback"
+  for ds in running startup; do
+    "$DUMP" $ds | LC_ALL=C sort > "$t/$ds.lines"
+    cmp -s "$t/$ds.lines" "$dir/$ds.lines" || die "$ds differs from the saved one after the rollback"
+  done
+  echo "rolled back: $name@$old, running and startup as before the upgrade"
+}
+
+upgrade() {
+  local new=$1 allow=$2 name rev old rc dir
+  new=$(realpath "$new")
+  rc=0; "$here/labsw-upgrade-check" "$new" || rc=$?
+  case $rc in
+    0) ;;
+    3) [ "$allow" = 1 ] || { echo "$me: stopped: values would be lost (--allow-loss to accept)" >&2; exit 3; }
+       echo "$me: --allow-loss: going on" ;;
+    2) echo "$me: stopped: sysrepo rejects the upgrade" >&2; exit 2 ;;
+    *) exit $rc ;;
+  esac
+  name=$(sed -n 's/^[[:space:]]*module[[:space:]]\{1,\}\([A-Za-z0-9_.-]\{1,\}\).*/\1/p' "$new" | head -1)
+  rev=$(sed -n 's/^[[:space:]]*revision[[:space:]]\{1,\}"\{0,1\}\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p' "$new" | head -1)
+  old=$(installed "$name")
+  [ "$old" != "$rev" ] || exit 0    # the check said: nothing to do
+  [ -f "$repo/yang/$name@$old.yang" ] || die "no $repo/yang/$name@$old.yang to go back to"
+
+  local base=${LABSW_STATE:-/var/lib/labsw}/upgrade
+  mkdir -p "$base"
+  dir=$base/$name@$old-to-$rev-$(date +%Y%m%dT%H%M%S)
+  [ ! -e "$dir" ] || die "$dir exists"
+  # complete or absent: written as .tmp, renamed when everything is on disk
+  local tmp=$dir.tmp
+  rm -rf "$tmp"; mkdir -m 700 "$tmp"
+  cp "$repo/yang/$name@$old.yang" "$tmp/"
+  cp "$new" "$tmp/new.yang"
+  save_ds "$tmp" || { rm -rf "$tmp"; die "cannot save running and startup"; }
+  printf 'module=%s\nold=%s\nnew=%s\nfile=%s\nrepository=%s\nlist=%s\n' "$name" "$old" "$rev" \
+    "$name@$old.yang" "$repo" "$(sysrepoctl -l | awk -F'|' -v n="$name" '{m=$1; gsub(/ /,"",m)} m==n')" > "$tmp/meta"
+  sync "$tmp"/*
+  mv "$tmp" "$dir"
+  sync "$base"
+
+  if ! sysrepoctl -U "$new" -s "$(dirname "$new")"; then
+    rm -rf "$dir"
+    die "sysrepoctl -U failed, nothing was changed"
+  fi
+  [ "$(installed "$name")" = "$rev" ] || die "$name is not at $rev after sysrepoctl -U"
+  echo "upgraded $name: $old -> $rev, saved in $dir"
+  echo "to go back: $self --rollback $dir"
+}
+
+case ${1:-} in
+  --rollback) [ $# -eq 2 ] || usage; rollback "$2" ;;
+  ""|-*) usage ;;
+  *) allow=0
+     [ $# -le 2 ] || usage
+     if [ $# -eq 2 ]; then [ "$2" = --allow-loss ] || usage; allow=1; fi
+     upgrade "$1" $allow ;;
+esac

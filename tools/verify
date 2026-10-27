@@ -78,15 +78,17 @@ def run_remote(args, out):
     scp = shlex.split(args.scp)
     rdir = "labsw-verify"
     build = Path(args.build or REPO / "build-aarch64")
-    for f in ("labswd", "reject_sub"):
+    for f in ("labswd", "reject_sub", "labsw-dump"):
         if not (build / f).exists():
             raise SystemExit(f"verify: no {build / f}; run tools/xbuild.sh first")
-    sh(ssh + [f"sudo rm -rf {rdir} && mkdir -p {rdir}/build {rdir}/tests {rdir}/yang {rdir}/keys && "
+    sh(ssh + [f"sudo rm -rf {rdir} && mkdir -p {rdir}/build {rdir}/tests {rdir}/yang {rdir}/tools {rdir}/keys && "
               f"ssh-keygen -q -t ed25519 -N '' -f {rdir}/keys/nc_test"], stdout=subprocess.DEVNULL)
     host = args.dest
     sh(scp + ["-q", "-r", str(REPO / "tests/int"), f"{host}:{rdir}/tests/"])
     sh(scp + ["-q"] + [str(p) for p in sorted((REPO / "yang").glob("*.yang"))] + [f"{host}:{rdir}/yang/"])
-    sh(scp + ["-q", str(build / "labswd"), str(build / "reject_sub"), f"{host}:{rdir}/build/"])
+    sh(scp + ["-q", str(build / "labswd"), str(build / "reject_sub"), str(build / "labsw-dump"),
+              f"{host}:{rdir}/build/"])
+    sh(scp + ["-q", str(REPO / "tools/labsw-upgrade"), str(REPO / "tools/labsw-upgrade-check"), f"{host}:{rdir}/tools/"])
     k = f" -k {shlex.quote(args.k)}" if args.k else ""
     # the route tests use the device's one FRR: an installed labswd service would
     # fight them over it (it puts its running routes back every few seconds)
