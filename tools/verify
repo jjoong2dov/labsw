@@ -127,10 +127,11 @@ def main():
     if args.target == "remote" and not (args.ssh and args.scp and args.dest):
         ap.error("remote needs --ssh, --scp and --dest (or LABSW_SSH, LABSW_SCP, LABSW_DEST)")
     name = args.name or args.target
+    rev = commit()  # now: the tests and the build are taken from the tree as it is at the start
     out = REPO / "results" / f"{time.strftime('%Y%m%d-%H%M%S')}-{name}"
     out.mkdir(parents=True)
     res = run_host(args, out) if args.target == "host" else run_remote(args, out)
-    summary = {"target": name, "commit": commit(), "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    summary = {"target": name, "commit": rev, "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                "pytest_k": args.k, **res, "results": str(out)}
     (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps({k: summary[k] for k in ("target", "commit", "passed", "failed", "skipped", "seconds")}))
