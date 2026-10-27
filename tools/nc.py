@@ -20,8 +20,9 @@ Connection: --host/--port/--user/--key, default the devlab of this user
 The server's SSH host key is checked against ~/.ssh/known_hosts unless the host is this
 machine (127.0.0.1: the devlab, or a VM behind a forwarded port) or --no-hostkey-check is
 given. Add a device once: ssh-keyscan -p 830 <device> > k; ssh-keygen -lf k shows its
-fingerprint; compare it with the device's own (on its console: ssh-keygen -lf
-/etc/ssh/ssh_host_ed25519_key.pub), then cat k >> ~/.ssh/known_hosts
+fingerprint; compare it with what the device itself shows (on its console:
+ssh-keyscan -p 830 127.0.0.1 | ssh-keygen -lf -; the NETCONF host key is netopeer2's,
+not the one in /etc/ssh), then cat k >> ~/.ssh/known_hosts
 SPDX-License-Identifier: MIT
 """
 import argparse
