@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""labsw-upgrade-check NEW.yang... : rehearse `sysrepoctl -U` on a copy of the sysrepo
+repository and report configuration the upgrade would refuse or silently drop.
+
+Why: sysrepo 5.1.0 refuses an update whose new schema rejects the stored data
+(e.g. a shorter length, a new mandatory leaf), but a REMOVED node is dropped from
+running and startup without a word, and -U cannot go back to an older revision.
+
+How: export running and startup of the affected modules, copy the repository
+(startup lives in files, running in shared memory, so running is imported into
+the copy), run -U there with its own SHM prefix, export again and compare.
+The real repository is only read.
+
+Exit: 0 nothing lost, 1 usage/tool error, 2 the update would be refused,
+3 the update would drop configuration (listed).
+Uses SYSREPO_REPOSITORY_PATH and the sysrepoctl/sysrepocfg on PATH.
+SPDX-License-Identifier: MIT
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+
+DATASTORES = ("startup", "running")
+
+
+def run(argv, env, check=True):
+    r = subprocess.run(argv, env=env, capture_output=True, text=True)
+    if check and r.returncode:
+        raise RuntimeError(f"{' '.join(argv)}: {(r.stderr or r.stdout).strip()}")
+    return r
+
+
+def export(module, ds, env):
+    out = run(["sysrepocfg", "-X", "-d", ds, "-m", module, "-f", "json"], env).stdout
+    return json.loads(out) if out.strip() else {}
+
+
+def leaves(node, path=""):
+    """flatten JSON data into {path: value}. A list entry is named by its first
+    member: libyang prints the keys first, so with one key that is the key; a list
+    with several keys may report more lines than were really lost."""
+    res = {}
+    if isinstance(node, dict):
+        for k, v in node.items():
+            res.update(leaves(v, f"{path}/{k}"))
+    elif isinstance(node, list):
+        for e in node:
+            if isinstance(e, dict):
+                k, v = next(iter(e.items()), ("", ""))
+                res.update(leaves(e, f"{path}[{k}={v}]"))
+            else:
+                res[f"{path}[.={e}]"] = e
+    else:
+        res[path] = node
+    return res
+
+
+def repository():
+    # /etc/sysrepo: the default compiled into the stack of the device package
+    p = Path(os.environ.get("SYSREPO_REPOSITORY_PATH", "/etc/sysrepo"))
+    if not (p / "data").is_dir():
+        raise RuntimeError(f"{p} is not a sysrepo repository (set SYSREPO_REPOSITORY_PATH)")
+    return p
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.split("\n\n")[0], file=sys.stderr)
+        return 1
+    files = [Path(a).resolve() for a in argv]
+    modules = []
+    for f in files:
+        m = re.fullmatch(r"([A-Za-z_][\w.-]*)@\d{4}-\d{2}-\d{2}\.yang", f.name)
+        if not m or not f.exists():
+            print(f"labsw-upgrade-check: {f}: need an existing file named module@revision.yang", file=sys.stderr)
+            return 1
+        modules.append(m.group(1))
+
+    real = repository()
+    env = dict(os.environ)
+    before = {(m, ds): export(m, ds, env) for m in modules for ds in DATASTORES}
+
+    tmp = Path(tempfile.mkdtemp(prefix="lswup"))
+    shm = "lswup" + uuid.uuid4().hex[:8]
+    cenv = dict(env, SYSREPO_REPOSITORY_PATH=str(tmp / "repo"), SYSREPO_SHM_PREFIX=shm)
+    try:
+        # conn/, the lock and the event pipes (sr_evpipe*) belong to the processes
+        # using the real repository; copy only regular files
+        def skip(d, names):
+            return [n for n in names if n in ("conn", "sr_main_lock")
+                    or not (os.path.isdir(os.path.join(d, n)) or os.path.isfile(os.path.join(d, n)))]
+        shutil.copytree(real, tmp / "repo", ignore=skip)
+        for m in modules:
+            data = tmp / f"{m}.running.json"
+            data.write_text(json.dumps(before[(m, "running")]))
+            run(["sysrepocfg", f"--import={data}", "-d", "running", "-m", m, "-f", "json"], cenv)
+        r = run(["sysrepoctl", *sum((["-U", str(f)] for f in files), [])], cenv, check=False)
+        if r.returncode:
+            print("REFUSED: sysrepoctl -U would fail, nothing would change:")
+            print((r.stderr or r.stdout).strip())
+            return 2
+        lost = []
+        for m in modules:
+            for ds in DATASTORES:
+                after = leaves(export(m, ds, cenv))
+                for path, value in sorted(leaves(before[(m, ds)]).items()):
+                    if after.get(path) != value:
+                        lost.append(f"{ds}: {path} = {value!r}")
+        if lost:
+            print("DATA LOSS: sysrepoctl -U would succeed but drop this configuration:")
+            print("\n".join("  " + x for x in lost))
+            return 3
+        print(f"OK: {', '.join(f.name for f in files)} keeps all configuration")
+        return 0
+    finally:
+        for f in Path("/dev/shm").glob(shm + "*"):
+            f.unlink(missing_ok=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except RuntimeError as e:
+        print(f"labsw-upgrade-check: {e}", file=sys.stderr)
+        sys.exit(1)

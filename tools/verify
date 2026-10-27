@@ -3,8 +3,9 @@
 
   host    on this PC: unit tests (ctest) + integration tests with the mock adapters
   remote  on a VM or the Pi over SSH: integration tests against the real bridge and
-          FRR (LABSW_TARGET=bridge, as root). Copies the tests, the YANG modules and
-          a test build for the device (tools/xbuild.sh) to ~/labsw-verify there.
+          FRR (LABSW_TARGET=bridge, as root). Copies the tests and their fixtures, the
+          YANG modules, the upgrade tools and a test build for the device
+          (tools/xbuild.sh) to ~/labsw-verify there.
 
 Writes results/<time>-<target>/summary.json (commit, target, versions, command,
 passed/failed/skipped, seconds) next to junit.xml and the console log. A skipped
@@ -81,10 +82,11 @@ def run_remote(args, out):
     for f in ("labswd", "reject_sub"):
         if not (build / f).exists():
             raise SystemExit(f"verify: no {build / f}; run tools/xbuild.sh first")
-    sh(ssh + [f"sudo rm -rf {rdir} && mkdir -p {rdir}/build {rdir}/tests {rdir}/yang {rdir}/keys && "
+    sh(ssh + [f"sudo rm -rf {rdir} && mkdir -p {rdir}/build {rdir}/tests {rdir}/yang {rdir}/tools {rdir}/keys && "
               f"ssh-keygen -q -t ed25519 -N '' -f {rdir}/keys/nc_test"], stdout=subprocess.DEVNULL)
     host = args.dest
-    sh(scp + ["-q", "-r", str(REPO / "tests/int"), f"{host}:{rdir}/tests/"])
+    sh(scp + ["-q", "-r", str(REPO / "tests/int"), str(REPO / "tests/fixtures"), f"{host}:{rdir}/tests/"])
+    sh(scp + ["-q", str(REPO / "tools/labsw-upgrade"), str(REPO / "tools/labsw-upgrade-check"), f"{host}:{rdir}/tools/"])
     sh(scp + ["-q"] + [str(p) for p in sorted((REPO / "yang").glob("*.yang"))] + [f"{host}:{rdir}/yang/"])
     sh(scp + ["-q", str(build / "labswd"), str(build / "reject_sub"), f"{host}:{rdir}/build/"])
     k = f" -k {shlex.quote(args.k)}" if args.k else ""

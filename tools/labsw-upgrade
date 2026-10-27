@@ -1,0 +1,69 @@
+#!/bin/bash
+# labsw-upgrade NEW.yang [--allow-loss]   : update one YANG module of the device, safely
+# labsw-upgrade --rollback DIR            : go back to what DIR saved before an upgrade
+#
+# upgrade:  1. labsw-upgrade-check rehearses it on a copy (refused -> stop; data
+#              loss -> stop unless --allow-loss)
+#           2. saves the installed module file and running+startup of the module
+#              in $LABSW_STATE/upgrade/<module>@<old>-<time>/ (printed)
+#           3. sysrepoctl -U, then checks the revision
+# rollback: sysrepoctl -U cannot go to an older revision, so: uninstall, install the
+#           saved old file, import the saved startup and running. Stop labswd first
+#           (it is subscribed to the module); start it again after.
+#
+# Uses SYSREPO_REPOSITORY_PATH (default /etc/sysrepo) and sysrepoctl/sysrepocfg on PATH.
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+repo=${SYSREPO_REPOSITORY_PATH:-/etc/sysrepo}
+state=${LABSW_STATE:-/var/lib/labsw}
+
+die() { echo "labsw-upgrade: $*" >&2; exit 1; }
+
+# module -> column of `sysrepoctl -l` (2 revision, 5 startup permissions), or empty
+installed() {
+  sysrepoctl -l | awk -F'|' -v n="$1" -v c="$2" '{gsub(/ /,"",$1); gsub(/ /,"",$c)} $1==n {print $c}'
+}
+installed_rev() { installed "$1" 2; }
+
+if [ "${1:-}" = --rollback ]; then
+  dir=${2:?usage: labsw-upgrade --rollback DIR}
+  [ -f "$dir/module" ] || die "$dir: not a directory saved by upgrade"
+  read -r mod old perms < "$dir/module"
+  echo "rollback $mod to $old from $dir"
+  sysrepoctl -u "$mod"
+  sysrepoctl -i "$dir/$mod@$old.yang" -p "$perms"
+  sysrepocfg --import="$dir/startup.json" -d startup -m "$mod" -f json
+  sysrepocfg --import="$dir/running.json" -d running -m "$mod" -f json
+  [ "$(installed_rev "$mod")" = "$old" ] || die "rollback: $mod is not at $old"
+  echo "ok: $mod@$old with the saved startup and running"
+  exit 0
+fi
+
+new=${1:?usage: labsw-upgrade NEW.yang [--allow-loss] | labsw-upgrade --rollback DIR}
+allow=${2:-}
+base=$(basename "$new" .yang); mod=${base%@*}; rev=${base#*@}
+old=$(installed_rev "$mod")
+[ -n "$old" ] || die "$mod is not installed (use sysrepoctl -i)"
+[ "$old" != "$rev" ] || { echo "$mod@$rev already installed"; exit 0; }
+
+set +e
+"$here/labsw-upgrade-check" "$new"; rc=$?
+set -e
+case $rc in
+  0) ;;
+  3) [ "$allow" = --allow-loss ] || die "stopped: the update would drop the configuration above (--allow-loss to go on)";;
+  *) die "stopped: the rehearsal failed (exit $rc), nothing changed";;
+esac
+
+dir=$state/upgrade/$mod@$old-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$dir"; chmod 700 "$dir"
+cp "$repo/yang/$mod@$old.yang" "$dir/"
+sysrepocfg -X -d startup -m "$mod" -f json > "$dir/startup.json"
+sysrepocfg -X -d running -m "$mod" -f json > "$dir/running.json"
+echo "$mod $old $(installed "$mod" 5)" > "$dir/module"
+echo "saved $mod@$old and its startup/running in $dir"
+
+sysrepoctl -U "$new"
+[ "$(installed_rev "$mod")" = "$rev" ] || die "$mod is not at $rev after sysrepoctl -U"
+echo "ok: $mod $old -> $rev (rollback: $0 --rollback $dir)"

@@ -10,3 +10,6 @@
 | `frr_running_two_nexthops.json` | 위 상태에서 `ip route 198.51.100.0/24 203.0.113.10` 을 더한 뒤 실제 출력(한 prefix 에 next hop 둘) |
 | `frr_running_empty.json` | 정적 경로를 모두 지운 뒤 실제 출력 |
 | `frr_running_after_start.json` | 같은 VM 을 재부팅한 직후(정적 경로를 한 번도 설정하지 않은 FRR) 같은 명령의 실제 출력: `{}` 뿐 |
+
+`upgrade/labsw-switch@2026-11-0{1,2,3}.yang`: 17장 시험용 가짜 새 revision (2026-10-27 판에서 한 군데씩 바꿈).
+11-01 은 port 에 description 추가(호환), 11-02 는 VLAN name 길이 1..16(저장된 이름이 길면 거부), 11-03 은 VLAN name 삭제(데이터가 조용히 사라짐).

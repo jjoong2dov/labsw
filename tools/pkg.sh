@@ -13,7 +13,8 @@ t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
 d=$t/labsw; mkdir -p "$d/yang" "$d/systemd"
 [ -x "$stage/opt/labsw/sbin/netopeer2-server" ] || { echo "pkg.sh: no $stage/opt/labsw/sbin/netopeer2-server" >&2; exit 1; }
 tar -C "$stage" --owner=0 --group=0 -czf "$d/labsw-stack.tgz" opt/labsw
-cp "$build/labswd" "$here/tools/lab_up.sh" "$here/tools/lab_down.sh" "$here/deploy/install.sh" "$here/deploy/nacm_admin.xml" "$d/"
+cp "$build/labswd" "$here/tools/lab_up.sh" "$here/tools/lab_down.sh" "$here/deploy/install.sh" "$here/deploy/nacm_admin.xml" \
+   "$here/tools/labsw-upgrade" "$here/tools/labsw-upgrade-check" "$d/"
 cp "$here"/yang/*.yang "$d/yang/"
 cp "$here"/deploy/systemd/*.service "$d/systemd/"
 ( cd "$d" && sha256sum labsw-stack.tgz labswd yang/*.yang > SHA256SUMS )

@@ -1,0 +1,180 @@
+module labsw-switch {
+  yang-version 1.1;
+  namespace "urn:example:labsw-switch";
+  prefix lsw;
+
+  organization
+    "labsw (example code for the book)";
+  description
+    "VLAN membership of the ports of one Linux bridge.
+
+     Every port of the bridge is owned by this model: a port that is
+     not listed under /switch/port has no VLAN at all.";
+
+  revision 2026-11-01 {
+    description
+      "Example upgrade (compatible): port description.";
+  }
+  revision 2026-10-27 {
+    description
+      "Notifications health-changed and repaired.";
+  }
+  revision 2026-10-26 {
+    description
+      "Initial revision.";
+  }
+
+  typedef vlan-id {
+    type uint16 {
+      range "1..4094";
+    }
+  }
+
+  typedef port-name {
+    type string {
+      length "1..15";
+      pattern '[A-Za-z0-9_.-]+';
+    }
+    description
+      "Linux interface name (at most 15 characters).";
+  }
+
+  typedef egress-mode {
+    type enumeration {
+      enum tagged {
+        description
+          "Frames leave the port with the VLAN tag.";
+      }
+      enum untagged {
+        description
+          "The VLAN tag is removed when frames leave the port.";
+      }
+    }
+  }
+
+  grouping port-vlan {
+    leaf pvid {
+      type boolean;
+      default "false";
+      description
+        "Untagged frames entering the port are put into this VLAN.";
+    }
+    leaf egress {
+      type egress-mode;
+      default "tagged";
+    }
+  }
+
+  container switch {
+    description
+      "Configured VLANs and port memberships.";
+    list vlan {
+      key "vid";
+      description
+        "VLANs that ports may use.";
+      leaf vid {
+        type vlan-id;
+      }
+      leaf name {
+        type string {
+          length "1..32";
+        }
+      }
+    }
+    list port {
+      key "name";
+      must "count(vlan[pvid = 'true']) <= 1" {
+        error-message "A port can have at most one PVID.";
+      }
+      leaf name {
+        type port-name;
+      }
+      leaf description {
+        type string;
+      }
+      list vlan {
+        key "vid";
+        leaf vid {
+          type leafref {
+            path "/lsw:switch/lsw:vlan/lsw:vid";
+          }
+        }
+        uses port-vlan;
+      }
+    }
+  }
+
+  container switch-state {
+    config false;
+    description
+      "What the agent reads back from the bridge. While a change or
+       a repair is being applied, the ports are the last state read
+       before it (the bridge itself is half way then).";
+    leaf health {
+      type health;
+    }
+    leaf last-error {
+      type string;
+    }
+    leaf repairs {
+      type uint64;
+      description
+        "How many times the agent found the bridge different from
+         running (changed outside NETCONF) and put running back.";
+    }
+    list port {
+      key "name";
+      leaf name {
+        type port-name;
+      }
+      list vlan {
+        key "vid";
+        leaf vid {
+          type vlan-id;
+        }
+        uses port-vlan;
+      }
+    }
+  }
+
+  typedef health {
+    type enumeration {
+      enum ok;
+      enum degraded {
+        description
+          "The bridge may differ from running and the agent could not
+           fix it.";
+      }
+    }
+  }
+
+  notification health-changed {
+    description
+      "Sent when switch-state/health changes.";
+    leaf health {
+      type health;
+    }
+    leaf reason {
+      type string;
+      description
+        "The error that made the agent degraded, or what fixed it.";
+    }
+  }
+
+  notification repaired {
+    description
+      "Sent when the agent found the bridge different from running
+       (changed outside NETCONF) and put running back.";
+    leaf repairs {
+      type uint64;
+      description
+        "switch-state/repairs after this repair.";
+    }
+    leaf difference {
+      type string;
+      description
+        "The first difference found, e.g. 'p1 VLAN 10: not a member, expected
+         pvid untagged'.";
+    }
+  }
+}
