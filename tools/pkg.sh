@@ -19,7 +19,9 @@ cp "$build/labswd" "$here/tools/lab_up.sh" "$here/tools/lab_down.sh" "$here/depl
    "$here/tools/labsw-upgrade" "$here/tools/labsw-upgrade-check" "$d/"
 cp "$here"/yang/*.yang "$d/yang/"
 cp "$here"/deploy/systemd/*.service "$d/systemd/"
-( cd "$d" && sha256sum labsw-stack.tgz labswd yang/*.yang > SHA256SUMS )
+# every file of the bundle (install.sh and the units run as root too); this catches a
+# file broken on the way, not a forged bundle: compare it with a hash you got elsewhere
+( cd "$d" && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | sort | xargs sha256sum > SHA256SUMS )
 git -C "$here" describe --always --dirty > "$d/VERSION"
 mkdir -p "$(dirname "$out")"
 tar -C "$t" -czf "$out" labsw
