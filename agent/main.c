@@ -12,6 +12,9 @@
  *
  * With -f vtysh the agent also keeps /labsw-route:routes in FRR (routes.c).
  *
+ * labsw-ops RPCs backup and restore (ops.c) keep copies of running in files
+ * under -B dir (default /var/lib/labsw/backup).
+ *
  * With -R n the agent also compares running with the device every n seconds and
  * puts back what someone changed outside NETCONF (policy: NETCONF wins). It
  * skips a round while a change is between CHANGE and DONE/ABORT.
@@ -44,6 +47,7 @@
 
 #include "adapter/adapter.h"
 #include "core/txn.h"
+#include "ops.h"
 #include "routes.h"
 
 #define MODULE "labsw-switch"
@@ -578,22 +582,23 @@ end:
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: labswd [-b bridge] [-f /path/to/vtysh [-N frr-instance]] [-P priority] [-R seconds] [-D ms] [-v]\n"
+    fprintf(stderr, "usage: labswd [-b bridge] [-f /path/to/vtysh [-N frr-instance]] [-P priority] [-R seconds] [-D ms] [-B backup-dir] [-v]\n"
 #ifdef LSW_TESTING
-                    "       labswd -a mock -m state.json [-r routes.json] [-t trace.txt] [-F n] [-G n]   (test build)\n"
+                    "       labswd -a mock -m state.json [-r routes.json] [-t trace.txt] [-F n] [-G n] [-K n]   (test build)\n"
 #endif
     );
 }
 
 int main(int argc, char **argv)
 {
-    const char *bridge = "br0", *vtysh = NULL, *frr_ns = NULL;
+    const char *bridge = "br0", *vtysh = NULL, *frr_ns = NULL, *backup_dir = "/var/lib/labsw/backup";
 #ifdef LSW_TESTING
     const char *adapter = "bridge", *mock_state = NULL, *trace = NULL, *mock_routes = NULL;
 #endif
     struct lsw_route_adapter *ra = NULL;
     struct lsw_routes *rwant = NULL;
     int route_fail_at = 0;
+    long backup_fail_at = 0;
     sr_conn_ctx_t *conn = NULL;
     sr_session_ctx_t *sess = NULL;
     sr_subscription_ctx_t *sub = NULL;
@@ -602,7 +607,7 @@ int main(int argc, char **argv)
     int opt, rc = 1, sig, every = 0, deadline = 3000;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    while ((opt = getopt(argc, argv, "b:f:N:P:R:D:a:m:r:t:F:G:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "b:f:N:P:R:D:B:a:m:r:t:F:G:K:vh")) != -1) {
         switch (opt) {
         case 'b': bridge = optarg; break;
         case 'v': g.verbose = 1; break;
@@ -611,6 +616,7 @@ int main(int argc, char **argv)
         case 'D': deadline = atoi(optarg); break;
         case 'f': vtysh = optarg; break;
         case 'N': frr_ns = optarg; break;
+        case 'B': backup_dir = optarg; break;
 #ifdef LSW_TESTING
         case 'a': adapter = optarg; break;
         case 'm': mock_state = optarg; break;
@@ -618,6 +624,7 @@ int main(int argc, char **argv)
         case 'F': g.txn.fail_at = atoi(optarg); break;
         case 'G': route_fail_at = atoi(optarg); break;
         case 'r': mock_routes = optarg; break;
+        case 'K': backup_fail_at = atol(optarg); break;
 #endif
         default: usage(); return 2;
         }
@@ -678,6 +685,8 @@ int main(int argc, char **argv)
         logf_("%s subscribe: %s", ROUTE_MODULE, sr_strerror(rc));
         goto end;
     }
+    if ((rc = ops_start(conn, backup_dir, backup_fail_at, log_line)))
+        goto end;
     logf_("running (adapter %s%s%s)", g.a->name, ra ? ", " : "", ra ? ra->name : "");
     for (;;) {
         struct timespec ts = {.tv_sec = every};
@@ -690,6 +699,7 @@ int main(int argc, char **argv)
     logf_("signal %d, stopping", sig);
     rc = 0;
 end:
+    ops_stop();
     sr_unsubscribe(sub);
     sr_disconnect(conn);
     g.a->destroy(g.a);

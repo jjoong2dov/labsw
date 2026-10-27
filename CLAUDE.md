@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 labsw: 라즈베리 파이 4 의 Linux bridge(br0)와 FRR 을 "작은 L2/L3 장비"로 보고 NETCONF/YANG 관리면을 붙인 예제 (책 《라즈베리 파이로 만드는 NETCONF/YANG 네트워크 장비》의 실습 저장소, MIT).
 
-- `yang/` 자체 YANG 모듈. `labsw-switch`(포트·VLAN), `labsw-route`(IPv4 정적 경로 → FRR)
-- `agent/` C 에이전트 `labswd`: sysrepo 구독 → 장비 적용. `main.c`(labsw-switch), `routes.c`(labsw-route)
-  - `core/` sysrepo 를 모르는 순수 로직: 상태(state)·계획(plan)·트랜잭션(txn: 적용·되돌리기·검증), 경로(route, rtxn)
+- `yang/` 자체 YANG 모듈. `labsw-switch`(포트·VLAN), `labsw-route`(IPv4 정적 경로 → FRR), `labsw-ops`(RPC backup·restore)
+- `agent/` C 에이전트 `labswd`: sysrepo 구독 → 장비 적용. `main.c`(labsw-switch), `routes.c`(labsw-route), `ops.c`(labsw-ops: running 두 모듈 ↔ `-B` 디렉터리의 `<name>.json`)
+  - `core/` sysrepo 를 모르는 순수 로직: 상태(state)·계획(plan)·트랜잭션(txn: 적용·되돌리기·검증), 경로(route, rtxn), 백업 파일(backup: 이름 검사·원자적 교체)
   - `adapter/` 장비 쪽: `exec.c`(argv 실행기), `bridge.c`(iproute2 bridge/ip -j), `frr.c`(vtysh), `mock*.c`(JSON 파일로 흉내 낸 장비, 시험 빌드에만)
 - `tests/unit/` cmocka 단위 시험, `tests/int/` pytest+ncclient 통합 시험(실제 sysrepo·netopeer2 + 가짜 장비 또는 실제 bridge)
 - `tools/` verify(장비별 시험 실행·요약), xbuild.sh·pkg.sh(aarch64 묶음), lab_up/down.sh
@@ -26,7 +26,7 @@ cd tests/int && python3 -m pytest -q -k 이름        # 하나만
 ```
 
 - 통합 시험은 시험마다 sysrepo 저장소·SHM 접두사·포트를 따로 만든다(`tests/int/conftest.py` 의 `Lab`). 실행 중인 다른 netopeer2/labswd 를 건드리지 않는다.
-- 시험 빌드(`LABSW_TESTING=ON`)에만 mock 장비와 결함 주입 옵션이 있다: `labswd -a mock -m state.json [-r routes.json] [-t trace.txt] [-F n] [-G n]`
+- 시험 빌드(`LABSW_TESTING=ON`)에만 mock 장비와 결함 주입 옵션이 있다: `labswd -a mock -m state.json [-r routes.json] [-t trace.txt] [-F n] [-G n] [-K n]` (`-K`: 백업 파일 쓰기가 n 바이트 뒤 실패)
 - 실제 bridge 대상(VM·파이, root): `tools/verify --target remote ...` (`LABSW_TARGET=bridge`)
 
 ## 규칙

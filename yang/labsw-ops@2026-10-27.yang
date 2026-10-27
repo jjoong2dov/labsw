@@ -1,0 +1,65 @@
+module labsw-ops {
+  yang-version 1.1;
+  namespace "urn:example:labsw-ops";
+  prefix lops;
+
+  organization
+    "labsw (example code for the book)";
+  description
+    "Operations on the agent: back up the running configuration of
+     labsw-switch and labsw-route to a file on the device, and put it
+     back.
+
+     A backup is the file <backup directory>/<name>.json (labswd -B,
+     default /var/lib/labsw/backup), JSON as in RFC 7951.";
+
+  revision 2026-10-27 {
+    description
+      "Initial revision.";
+  }
+
+  typedef backup-name {
+    type string {
+      length "1..32";
+      pattern '[A-Za-z0-9_-][A-Za-z0-9_.-]*';
+    }
+    description
+      "A file name, not a path: no '/', and no leading '.', so it
+       cannot be '.', '..' or point outside the backup directory.";
+  }
+
+  rpc backup {
+    description
+      "Write running /labsw-switch:switch and /labsw-route:routes to
+       the backup <name>, replacing a backup of the same name. The old
+       file stays as it was until the new one is complete on disk.";
+    input {
+      leaf name {
+        type backup-name;
+        mandatory true;
+      }
+    }
+    output {
+      leaf bytes {
+        type uint64;
+        description
+          "Size of the file written.";
+      }
+    }
+  }
+
+  rpc restore {
+    description
+      "Replace running /labsw-switch:switch and /labsw-route:routes
+       with the backup <name> in one transaction. A module the backup
+       does not have is emptied. If the file is missing or not valid,
+       or the agent cannot apply it to the device, nothing changes
+       and the RPC fails.";
+    input {
+      leaf name {
+        type backup-name;
+        mandatory true;
+      }
+    }
+  }
+}
