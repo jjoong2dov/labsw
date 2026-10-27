@@ -6,7 +6,7 @@
 #include <sysrepo.h>
 
 /* subscribe the RPCs on a new subscription context *sub (own thread); backups are
- * kept in dir (created if missing); fail_after > 0 (tests) makes a backup write
+ * kept in dir (made with the first backup); fail_after > 0 (tests) makes a backup write
  * fail after that many bytes */
 int ops_init(sr_conn_ctx_t *conn, const char *dir, long fail_after, void (*log)(const char *msg),
              sr_subscription_ctx_t **sub);

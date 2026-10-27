@@ -65,6 +65,26 @@ static const char *input_name(const struct lyd_node *input)
     return n ? lyd_get_value(n) : NULL;
 }
 
+/* mkdir -p with 0700 for every directory it makes */
+static int make_dirs(const char *dir)
+{
+    char p[4096];
+    size_t n = strlen(dir);
+
+    if (n == 0 || n >= sizeof(p))
+        return -1;
+    memcpy(p, dir, n + 1);
+    for (char *c = p + 1; *c; c++) {
+        if (*c != '/')
+            continue;
+        *c = '\0';
+        if (mkdir(p, 0700) && errno != EEXIST)
+            return -1;
+        *c = '/';
+    }
+    return mkdir(p, 0700) && errno != EEXIST ? -1 : 0;
+}
+
 /* write all of buf to path through a temporary file; 0 or -1 with err */
 static int write_atomic(const char *name, const char *buf, size_t len, char *err, size_t errlen)
 {
@@ -76,6 +96,10 @@ static int write_atomic(const char *name, const char *buf, size_t len, char *err
     snprintf(path, sizeof(path), "%s/%s.json", o.dir, name);
     if (o.fail_after > 0 && (size_t)o.fail_after < len)
         limit = (size_t)o.fail_after;
+    if (make_dirs(o.dir)) {
+        snprintf(err, errlen, "backup %s: cannot make %.512s: %s", name, o.dir, strerror(errno));
+        return -1;
+    }
     unlink(tmp); /* left by a crash */
     if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600)) < 0) {
         snprintf(err, errlen, "backup %s: cannot create %.512s: %s", name, tmp, strerror(errno));
@@ -275,10 +299,8 @@ int ops_init(sr_conn_ctx_t *conn, const char *dir, long fail_after, void (*log)(
     o.fail_after = fail_after;
     if (!(o.dir = strdup(dir)))
         return SR_ERR_NO_MEMORY;
-    if (mkdir(dir, 0700) && errno != EEXIST) {
-        logf_("backup directory %s: %s", dir, strerror(errno));
-        return SR_ERR_SYS;
-    }
+    /* the directory is made when the first backup is written: a bad -B must not
+     * stop the agent (no subscriber would mean edits that never reach the device) */
     if ((rc = sr_session_start(conn, SR_DS_RUNNING, &o.run)) || (rc = sr_session_start(conn, SR_DS_RUNNING, &s)))
         return rc;
     /* own subscription context = own thread, see the top of the file */

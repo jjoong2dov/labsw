@@ -89,6 +89,7 @@ def test_restore_the_agent_rejects_changes_nothing(lab):
     lab.start_agent()
     with lab.nc() as m:
         edit(m, ACCESS10)
+        lab.backups.mkdir(exist_ok=True)   # made by the first backup; none was taken here
         (lab.backups / "p9.json").write_text(
             '{"labsw-switch:switch": {"vlan": [{"vid": 10}], "port": [{"name": "p9", "vlan": [{"vid": 10}]}]}}')
         restore_fails(lab, m, "p9", "p9")
@@ -122,3 +123,15 @@ def test_failed_backup_keeps_the_old_one(lab):
         assert "write failed after 10 of" in e.value.message
     assert (lab.backups / "keep.json").read_text() == "{}\n"
     assert sorted(p.name for p in lab.backups.iterdir()) == ["keep.json"]   # no .tmp left
+
+
+def test_backup_directory_is_made_when_needed(lab):
+    """-B pointing at a directory whose parents do not exist yet: the agent starts
+    (a bad -B must not take the subscriber away) and the first backup makes it"""
+    lab.backups = lab.base / "not" / "yet" / "there"
+    lab.start_agent()
+    with lab.nc() as m:
+        edit(m, ACCESS10)
+        rpc(m, "backup", "first")
+    assert (lab.backups / "first.json").exists()
+    assert oct(lab.backups.stat().st_mode & 0o777) == "0o700"
