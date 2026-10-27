@@ -25,7 +25,7 @@ endif()
 
 pkg_check_modules(SYSREPO REQUIRED sysrepo)
 pkg_check_modules(LIBYANG REQUIRED libyang)
-add_executable(labswd agent/main.c agent/routes.c)
+add_executable(labswd agent/main.c agent/routes.c agent/ops.c)
 target_include_directories(labswd PRIVATE agent ${SYSREPO_INCLUDE_DIRS} ${LIBYANG_INCLUDE_DIRS})
 target_link_libraries(labswd labsw_core ${SYSREPO_LINK_LIBRARIES} ${LIBYANG_LINK_LIBRARIES} pthread)
 install(TARGETS labswd DESTINATION sbin)

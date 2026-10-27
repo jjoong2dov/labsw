@@ -1,0 +1,60 @@
+module labsw-ops {
+  yang-version 1.1;
+  namespace "urn:example:labsw-ops";
+  prefix lops;
+
+  organization
+    "labsw (example code for the book)";
+  description
+    "Backup and restore of the configuration labswd owns
+     (labsw-switch and labsw-route in running).
+
+     A backup is a JSON file on the device. Restore replaces both
+     modules in running in one transaction: if the agent cannot apply
+     the backup to the bridge or FRR, running and the device stay as
+     they were.";
+
+  revision 2026-10-27 {
+    description
+      "Initial revision.";
+  }
+
+  typedef backup-name {
+    type string {
+      length "1..32";
+      pattern '[A-Za-z0-9_-]+';
+    }
+    description
+      "File name without directory and extension; no '/' or '.', so
+       a name cannot point outside the backup directory.";
+  }
+
+  rpc backup {
+    description
+      "Save running of labsw-switch and labsw-route. An existing
+       backup of the same name is replaced only when the new file is
+       completely written (write a new file, then rename).";
+    input {
+      leaf name {
+        type backup-name;
+        mandatory true;
+      }
+    }
+    output {
+      leaf bytes {
+        type uint64;
+      }
+    }
+  }
+
+  rpc restore {
+    description
+      "Replace running of labsw-switch and labsw-route with a backup.";
+    input {
+      leaf name {
+        type backup-name;
+        mandatory true;
+      }
+    }
+  }
+}

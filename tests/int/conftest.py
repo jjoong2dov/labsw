@@ -259,6 +259,7 @@ class Lab:
                         PATH=f"{PREFIX}/bin:{PREFIX}/sbin:" + os.environ["PATH"],
                         LD_LIBRARY_PATH=f"{PREFIX}/lib:" + os.environ.get("LD_LIBRARY_PATH", ""))
         self.procs = {}
+        self.backups = base / "backup"
 
     def run(self, *argv, check=True):
         return subprocess.run(argv, env=self.env, check=check, capture_output=True, text=True)
@@ -296,8 +297,11 @@ class Lab:
                                          "-p", str(self.base / "np2.pid"),
                                          "-f", str(self.base / "np2")], listening)
 
-    def start_agent(self, fail_at=None, prio=None, every=None, route_fail_at=None):
+    def start_agent(self, fail_at=None, prio=None, every=None, route_fail_at=None, backup_fail=None):
         argv = getattr(self.dev, "agent_prefix", list)() + [str(BUILD / "labswd")] + self.dev.agent_args()
+        argv += ["-B", str(self.backups)]  # never the default /var/lib/labsw of an installed agent
+        if backup_fail:
+            argv += ["-K", str(backup_fail)]
         if prio is not None:
             argv += ["-P", str(prio)]
         if every is not None:
