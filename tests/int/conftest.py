@@ -8,8 +8,8 @@ Not FRR: with LABSW_TARGET=bridge the route tests use the one FRR of the machine
 each test), and no other labswd may manage it meanwhile.
 
 Needs the stack of the same versions (LABSW_PREFIX, default ~/opt/labsw-host),
-a test build of labsw (LABSW_BUILD, default <repo>/build) and an SSH key pair
-for NETCONF (LABSW_NC_KEY, default $LABSW_PREFIX/keys/nc_test).
+a test build of labsw (LABSW_BUILD, default <repo>/build). The SSH key pair for
+NETCONF is LABSW_NC_KEY if set, else one made for this test run.
 SPDX-License-Identifier: MIT
 """
 import getpass
@@ -30,7 +30,7 @@ from ncclient import manager
 REPO = Path(__file__).resolve().parents[2]
 PREFIX = Path(os.environ.get("LABSW_PREFIX", Path.home() / "opt/labsw-host"))
 BUILD = Path(os.environ.get("LABSW_BUILD", REPO / "build"))
-KEY = Path(os.environ.get("LABSW_NC_KEY", PREFIX / "keys/nc_test"))
+KEY = Path(os.environ["LABSW_NC_KEY"]) if os.environ.get("LABSW_NC_KEY") else None  # see nc_key()
 TARGET = os.environ.get("LABSW_TARGET", "mock")
 VTYSH = os.environ.get("LABSW_VTYSH", "/usr/bin/vtysh")
 NS = "urn:example:labsw-switch"
@@ -355,6 +355,17 @@ class Lab:
         return manager.connect(host="127.0.0.1", port=self.port, username=self.user,
                                password="", key_filename=str(KEY), hostkey_verify=False,
                                allow_agent=False, look_for_keys=False, timeout=20)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def nc_key(tmp_path_factory):
+    """the client key: LABSW_NC_KEY, or a new one for this run (a missing key used to
+    skip every test, and a run where everything is skipped looks like a pass)"""
+    global KEY
+    if KEY is None:
+        KEY = tmp_path_factory.mktemp("key") / "nc_test"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(KEY)], check=True)
+    return KEY
 
 
 @pytest.fixture

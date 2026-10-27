@@ -31,6 +31,8 @@ cmake -S . -B build -DLABSW_TESTING=ON && cmake --build build -j
 cd tests/int && python3 -m pytest -q          # 통합 시험 (약 2분), 끝나면 cd ../..
 ```
 
+통합 시험 결과는 "45 passed, 2 skipped" 처럼 passed 가 대부분이어야 합니다(건너뛰는 둘은 실제 브리지 전용 시험과 장시간 시험). skipped 만 잔뜩 나오면 통과가 아니라 환경 문제이니 `python3 -m pytest -q -rs` 로 이유를 보세요.
+
 갖고 놀 장비 하나 띄우기: NETCONF 서버(127.0.0.1:8301)와 에이전트, 포트 p1·p2·p3 를 흉내 내는 가짜 장비입니다.
 
 ```sh
