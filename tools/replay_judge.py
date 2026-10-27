@@ -83,11 +83,18 @@ def main(ch, src=None, extra_env=""):
     """src: what to judge, default the branch replay/<ch>"""
     ref, files = CHAPTERS[ch]
     repo, rev = REPO, (src or f"replay/{ch}")
+    # a fresh clone has the book's branches only as origin/replay/<ch>
+    for r in (rev, f"origin/{rev}"):
+        h = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", "--short", f"{r}^{{commit}}"],
+                           capture_output=True, text=True)
+        if h.returncode == 0:
+            rev, head = r, h.stdout.strip()
+            break
+    else:
+        sys.exit(f"replay_judge.py: no commit {rev} (nor origin/{rev}); git fetch --all --tags?")
     out = REPO / "results" / f"judge-{ch}-{time.strftime('%Y%m%d-%H%M%S')}"
     work = out / "tree"
     work.mkdir(parents=True)
-    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", rev], capture_output=True, text=True,
-                          check=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(repo), "status", "--short"], capture_output=True, text=True).stdout
     subprocess.run(f"git -C {repo} archive {rev} | tar -x -C {work}", shell=True, check=True)
     acc = work / "tests/accept"

@@ -10,13 +10,15 @@
 
 저자는 기록을 남기려고 `claude -p`(허용 명령은 `prompts/allowed.txt`)로 돌렸습니다. 대화 화면에 같은 프롬프트를 넣어도 됩니다. 여러분의 결과는 책과 다르게 나옵니다. 같아야 할 것은 판정 시험의 통과입니다.
 
-해 보기:
+해 보기 (시작 태그에는 판정기와 프롬프트가 없으므로, 따로 worktree 를 만들어 거기서 작업하고 판정은 main 작업 트리에서 합니다):
 
 ```sh
-git switch -c my-ch16 ch16-start
-# claude 에게 prompts/ch16.txt 를 그대로 주고, 끝나면 커밋
+git fetch --all --tags                       # 새로 clone 했다면 가지는 origin/replay/ch16 으로 있습니다
+git worktree add ../my-ch16 -b my-ch16 ch16-start
+# ../my-ch16 에서 claude 에게 replay/prompts/ch16.txt(main 작업 트리의 것)를 그대로 주고, 끝나면 커밋
 tools/replay_judge.py ch16 my-ch16          # 그 장 완성판의 시험을 여러분의 판에 돌림 (results/judge-*)
-tools/replay_judge.py ch16                  # 책의 replay 판(replay/ch16)
+tools/replay_judge.py ch16                  # 책의 replay 판(replay/ch16, 없으면 origin/replay/ch16)
+git worktree remove ../my-ch16               # 다 쓰면
 ```
 
 판정기는 세션이 보지 못한 시험(그 장 완성 커밋의 통합 시험)을 얹어 돌리고, 책의 구현 문구까지 보는 단언은 프롬프트가 요구한 수준으로 느슨하게 합니다(`tools/replay_judge.py` 의 RELAX). 책 원고는 12.10절, 16.10절, 17.11절과 부록 C 를 보십시오.

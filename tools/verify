@@ -32,14 +32,18 @@ def sh(argv, **kw):
 
 
 def junit_counts(path):
+    """one outcome per test: pytest writes a second <testcase> for an error in teardown"""
     root = ET.parse(path).getroot()
-    suites = [root] if root.tag == "testsuite" else list(root)
-    c = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
-    for s in suites:
-        for k in c:
-            c[k] += int(s.get(k, 0))
-    return {"passed": c["tests"] - c["failures"] - c["errors"] - c["skipped"],
-            "failed": c["failures"] + c["errors"], "skipped": c["skipped"]}
+    worst = {}
+    rank = {"passed": 0, "skipped": 1, "failed": 2}
+    for tc in root.iter("testcase"):
+        name = f"{tc.get('classname')}::{tc.get('name')}"
+        o = ("failed" if tc.find("failure") is not None or tc.find("error") is not None
+             else "skipped" if tc.find("skipped") is not None else "passed")
+        if rank[o] >= rank[worst.get(name, "passed")]:
+            worst[name] = o
+    c = {k: sum(1 for v in worst.values() if v == k) for k in rank}
+    return {"passed": c["passed"], "failed": c["failed"], "skipped": c["skipped"]}
 
 
 def commit():
