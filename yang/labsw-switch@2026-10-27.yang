@@ -11,6 +11,10 @@ module labsw-switch {
      Every port of the bridge is owned by this model: a port that is
      not listed under /switch/port has no VLAN at all.";
 
+  revision 2026-10-27 {
+    description
+      "Notifications health-changed and repaired.";
+  }
   revision 2026-10-26 {
     description
       "Initial revision.";
@@ -100,14 +104,7 @@ module labsw-switch {
        a repair is being applied, the ports are the last state read
        before it (the bridge itself is half way then).";
     leaf health {
-      type enumeration {
-        enum ok;
-        enum degraded {
-          description
-            "The last change failed and the previous state could not
-             be restored completely.";
-        }
-      }
+      type health;
     }
     leaf last-error {
       type string;
@@ -130,6 +127,47 @@ module labsw-switch {
         }
         uses port-vlan;
       }
+    }
+  }
+
+  typedef health {
+    type enumeration {
+      enum ok;
+      enum degraded {
+        description
+          "The bridge may differ from running and the agent could not
+           fix it.";
+      }
+    }
+  }
+
+  notification health-changed {
+    description
+      "Sent when switch-state/health changes.";
+    leaf health {
+      type health;
+    }
+    leaf reason {
+      type string;
+      description
+        "The error that made the agent degraded, or what fixed it.";
+    }
+  }
+
+  notification repaired {
+    description
+      "Sent when the agent found the bridge different from running
+       (changed outside NETCONF) and put running back.";
+    leaf repairs {
+      type uint64;
+      description
+        "switch-state/repairs after this repair.";
+    }
+    leaf difference {
+      type string;
+      description
+        "The first difference found, e.g. 'p1 VLAN 10: not a member, expected
+         pvid untagged'.";
     }
   }
 }

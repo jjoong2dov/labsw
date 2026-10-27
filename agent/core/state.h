@@ -37,7 +37,8 @@ const struct lsw_port *lsw_state_find(const struct lsw_state *s, const char *nam
 /* 1 if a valid Linux interface name we accept (see typedef port-name in the YANG module) */
 int lsw_valid_port_name(const char *name);
 
-/* compare: returns 0 if equal, else writes the first difference to why */
+/* 1 if they differ; why = the first difference, a as it is, b as expected:
+ * "p1 VLAN 10: not a member, expected pvid untagged" */
 int lsw_state_diff(const struct lsw_state *a, const struct lsw_state *b, char *why, size_t len);
 
 /* "10PU 20" style text of one port, for logs and tests */

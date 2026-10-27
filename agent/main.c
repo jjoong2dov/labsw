@@ -16,6 +16,11 @@
  * puts back what someone changed outside NETCONF (policy: NETCONF wins). It
  * skips a round while a change is between CHANGE and DONE/ABORT.
  *
+ * Notifications (labsw-switch): health-changed when switch-state/health changes,
+ * repaired after a reconcile round put running back. They are sent after the
+ * work is done and txn_lock is released; a health that flips and flips back
+ * before that is not sent.
+ *
  * What this is not: a transaction across the bridge and FRR. A change is applied
  * module by module during CHANGE and undone on failure or ABORT as well as the
  * agent can (best effort); in between, one may have the new state and the other
@@ -64,6 +69,10 @@ static struct {
     atomic_uint callbacks; /* bumped when a change callback starts; reconcile checks it */
     struct lsw_state seen; /* last device state read while no change ran (g.lock) */
     int seen_valid;
+    sr_session_ctx_t *nsess;  /* notifications are sent on this session */
+    int sent_degraded;        /* health in the last health-changed sent (g.lock) */
+    uint64_t sent_repairs;    /* repairs in the last repaired sent (g.lock) */
+    char difference[160];     /* the difference the last repair fixed (g.lock) */
 } g = {.lock = PTHREAD_MUTEX_INITIALIZER, .txn_lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void log_line(const char *msg)
@@ -87,6 +96,57 @@ static void set_health(int degraded, const char *err)
     g.degraded = degraded;
     snprintf(g.last_error, sizeof(g.last_error), "%s", err ? err : "");
     pthread_mutex_unlock(&g.lock);
+}
+
+static int send_notif(const char *name, const char *k1, const char *v1, const char *k2, const char *v2)
+{
+    const struct ly_ctx *ctx = sr_session_acquire_context(g.nsess);
+    const struct lys_module *mod = ly_ctx_get_module_implemented(ctx, MODULE);
+    struct lyd_node *n = NULL;
+    int rc = SR_ERR_LY;
+
+    if (!lyd_new_inner(NULL, mod, name, 0, &n) && !lyd_new_term(n, mod, k1, v1, 0, NULL) &&
+        (!v2 || !*v2 || !lyd_new_term(n, mod, k2, v2, 0, NULL)))
+        rc = sr_notif_send_tree(g.nsess, n, 0, 0); /* do not wait for the subscribers */
+    lyd_free_all(n);
+    sr_session_release_context(g.nsess);
+    if (rc)
+        logf_("notification %s: %s", name, sr_strerror(rc));
+    return rc;
+}
+
+/* send what changed since the last notifications; call without txn_lock */
+static void notify(void)
+{
+    char reason[1024], diff[160], num[24];
+    int degraded, health = 0, repaired = 0;
+    uint64_t repairs;
+
+    if (!g.nsess)
+        return;
+    pthread_mutex_lock(&g.lock);
+    degraded = g.degraded;
+    if (degraded != g.sent_degraded) {
+        health = 1;
+        g.sent_degraded = degraded;
+        snprintf(reason, sizeof(reason), "%s", g.last_error);
+    }
+    repairs = g.repairs;
+    if (repairs != g.sent_repairs) {
+        repaired = 1;
+        g.sent_repairs = repairs;
+        snprintf(diff, sizeof(diff), "%s", g.difference);
+    }
+    pthread_mutex_unlock(&g.lock);
+    if (health) {
+        logf_("notification health-changed: %s", degraded ? "degraded" : "ok");
+        send_notif("health-changed", "health", degraded ? "degraded" : "ok", "reason", reason);
+    }
+    if (repaired) {
+        snprintf(num, sizeof(num), "%llu", (unsigned long long)repairs);
+        logf_("notification repaired: %s", num);
+        send_notif("repaired", "repairs", num, "difference", diff);
+    }
 }
 
 /* /labsw-switch:switch of the session's view -> wanted device state */
@@ -329,6 +389,7 @@ static int on_change(sr_session_ctx_t *sess, uint32_t sub_id, const char *module
     pthread_mutex_lock(&g.txn_lock);
     rc = on_change_locked(sess, event, op_id);
     pthread_mutex_unlock(&g.txn_lock);
+    notify();
     return rc;
 }
 
@@ -380,17 +441,29 @@ static void reconcile(sr_session_ctx_t *sess, struct lsw_routes *rwant)
         else
             routes_reconcile_failed(rerr);
     }
-    if (!sw_ok || g.a->read(g.a, &dev, err, sizeof(err))) {
+    /* vlan_filtering off makes the VLAN table meaningless even if it equals running */
+    if (!sw_ok || g.a->check(g.a, err, sizeof(err)) || g.a->read(g.a, &dev, err, sizeof(err))) {
+        pthread_mutex_lock(&g.lock);
+        int same = g.degraded && !strcmp(g.last_error, err);
+        pthread_mutex_unlock(&g.lock);
+        if (!same) /* once, not every round */
+            logf_("reconcile: %s", err);
         set_health(1, err);
-        logf_("reconcile: %s", err);
         goto unlock;
     }
-    if (!lsw_state_diff(&dev, &want, why, sizeof(why)))
+    if (!lsw_state_diff(&dev, &want, why, sizeof(why))) {
+        pthread_mutex_lock(&g.lock);
+        int was = g.degraded;
+        pthread_mutex_unlock(&g.lock);
+        if (was) /* e.g. a read failed before, or a restore; now the device is right */
+            set_health(0, "the bridge equals running again");
         goto unlock;
+    }
     logf_("reconcile: device differs from running (%s), applying running", why);
     if (lsw_txn_apply(&g.txn, &want, &snap, err, sizeof(err)) == LSW_TXN_OK) {
         pthread_mutex_lock(&g.lock);
         g.repairs++;
+        snprintf(g.difference, sizeof(g.difference), "%s", why);
         pthread_mutex_unlock(&g.lock);
         set_health(0, NULL);
         logf_("reconcile: ok");
@@ -400,6 +473,7 @@ static void reconcile(sr_session_ctx_t *sess, struct lsw_routes *rwant)
     }
 unlock:
     pthread_mutex_unlock(&g.txn_lock);
+    notify();
 end:
     lsw_state_free(&want);
     lsw_state_free(&dev);
@@ -584,7 +658,8 @@ int main(int argc, char **argv)
     sigaddset(&sigs, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &sigs, NULL); /* before sysrepo starts its threads */
 
-    if ((rc = sr_connect(0, &conn)) || (rc = sr_session_start(conn, SR_DS_RUNNING, &sess))) {
+    if ((rc = sr_connect(0, &conn)) || (rc = sr_session_start(conn, SR_DS_RUNNING, &sess)) ||
+        (rc = sr_session_start(conn, SR_DS_OPERATIONAL, &g.nsess))) {
         logf_("sysrepo: %s", sr_strerror(rc));
         goto end;
     }

@@ -46,7 +46,7 @@ def test_capability_and_schema(lab):
         # a YANG 1.1 module is not listed in <hello> (RFC 7950 5.6.4), only in the YANG library
         assert not [c for c in m.server_capabilities if NS in c]
         lib = m.get(filter=("subtree", '<yang-library xmlns="urn:ietf:params:xml:ns:yang:ietf-yang-library"/>')).data_xml
-        assert "<name>labsw-switch</name>" in lib and "<revision>2026-10-26</revision>" in lib
+        assert "<name>labsw-switch</name>" in lib and "<revision>2026-10-27</revision>" in lib
         assert "module labsw-switch" in m.get_schema("labsw-switch").data
 
 
@@ -200,6 +200,33 @@ def test_start_applies_running_and_fixes_drift(lab):
 def oper_leaf(m, leaf):
     st = m.get(filter=("subtree", f'<switch-state xmlns="{NS}"/>')).data_xml
     return st.split(f"<{leaf}>")[1].split(f"</{leaf}>")[0] if f"<{leaf}>" in st else None
+
+
+def take_labsw_notification(m, timeout=30):
+    """next notification of labsw-switch (others, e.g. netconf-config-change, are skipped)"""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        n = m.take_notification(block=True, timeout=max(0.1, end - time.monotonic()))
+        if n is not None and NS in n.notification_xml:
+            return n.notification_xml
+    raise TimeoutError("no labsw-switch notification")
+
+
+def test_notifications(lab):
+    lab.start_agent(every=1)
+    with lab.nc() as m:
+        edit(m, ACCESS10)
+        m.create_subscription()
+        lab.dev.set_ports({"p1": {99: (True, True)}})
+        x = take_labsw_notification(m)
+        assert "<repaired" in x and "<repairs>1</repairs>" in x and "<difference>p1 VLAN 10: not a member, expected pvid untagged</difference>" in x
+        lab.dev.set_filtering(False)
+        x = take_labsw_notification(m)
+        assert "<health-changed" in x and "<health>degraded</health>" in x and "vlan_filtering" in x
+        lab.dev.set_filtering(True)
+        x = take_labsw_notification(m)
+        assert "<health-changed" in x and "<health>ok</health>" in x
+        assert lab.ports() == ACCESS10_DEV
 
 
 def test_drift_stays_without_reconcile(lab):

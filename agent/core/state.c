@@ -83,6 +83,15 @@ void lsw_port_text(const struct lsw_port *p, char *buf, size_t len)
     }
 }
 
+static const char *flags_text(uint8_t f)
+{
+    if (!f)
+        return "not a member";
+    if (f & LSW_F_PVID)
+        return f & LSW_F_UNTAGGED ? "pvid untagged" : "pvid tagged";
+    return f & LSW_F_UNTAGGED ? "untagged" : "tagged";
+}
+
 static int diff_port(const struct lsw_port *a, const struct lsw_port *b, const char *name, char *why, size_t len)
 {
     static const struct lsw_port empty;
@@ -93,7 +102,7 @@ static int diff_port(const struct lsw_port *a, const struct lsw_port *b, const c
         b = &empty;
     for (int v = 1; v <= LSW_VID_MAX; v++) {
         if (a->vid[v] != b->vid[v]) {
-            snprintf(why, len, "port %s vid %d: flags 0x%x != 0x%x", name, v, a->vid[v], b->vid[v]);
+            snprintf(why, len, "%s VLAN %d: %s, expected %s", name, v, flags_text(a->vid[v]), flags_text(b->vid[v]));
             return 1;
         }
     }
