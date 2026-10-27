@@ -159,3 +159,18 @@ def test_route_failure_undoes_switch_in_same_edit(lab, route_fail_at):
     log = lab.log("labswd")
     order = "switch first" if log.find("op ") < log.find("routes op") else "routes first"
     print("module order:", order)
+
+
+def test_degraded_clears_when_frr_equals_running_again(lab):
+    """someone fixes FRR by hand to exactly what running says: nothing to apply, but
+    health must still go back to ok (the switch part did this since chapter 12)"""
+    lab.start_agent(every=1)
+    with lab.nc() as m:
+        redit(m, TWO)
+        lab.dev.set_routes({"198.51.100.0/24": ["203.0.113.10", "203.0.113.9"], "198.51.100.128/25": "blackhole"})
+        wait_for(lambda: rstate(m, "health") == "degraded", "routes health degraded", timeout=30)
+        n = len(lab.trace_lines())
+        lab.dev.set_routes(TWO_DEV)
+        wait_for(lambda: rstate(m, "health") == "ok", "routes health ok", timeout=30)
+        assert len(lab.trace_lines()) == n      # nothing applied: FRR already equal
+        assert rstate(m, "repairs") == "0"

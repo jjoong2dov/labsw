@@ -283,8 +283,14 @@ void routes_reconcile_locked(const struct lsw_routes *want)
         routes_reconcile_failed(err);
         goto end;
     }
-    if (!lsw_routes_diff(now, want, why, sizeof(why)))
+    if (!lsw_routes_diff(now, want, why, sizeof(why))) {
+        pthread_mutex_lock(&r.lock);
+        int was = r.degraded;
+        pthread_mutex_unlock(&r.lock);
+        if (was) /* e.g. someone removed an ECMP route by hand: FRR is right again */
+            set_health(0, "FRR equals running again");
         goto end;
+    }
     logf_("routes reconcile: FRR differs from running (%s), applying running", why);
     if (lsw_rtxn_apply(&r.txn, want, snap, err, sizeof(err)) == LSW_TXN_OK) {
         pthread_mutex_lock(&r.lock);
