@@ -92,10 +92,13 @@ def test_route_drift_repaired(lab):
     lab.start_agent(every=1)
     with lab.nc() as m:
         redit(m, TWO)
-        lab.dev.set_routes({"198.51.100.0/24": "203.0.113.99", "192.0.2.0/24": "blackhole"})
-        wait_for(lambda: lab.dev.routes() == TWO_DEV, "the agent to repair the routes", timeout=30)
-        # the counter goes up after the agent has read FRR back, a moment after the change
-        wait_for(lambda: rstate(m, "repairs") == "1", "repairs = 1", timeout=10)
+        with lab.agent_paused():
+            lab.dev.set_routes({"198.51.100.0/24": "203.0.113.99", "192.0.2.0/24": "blackhole"})
+        # wait on the agent's own state, not by reading FRR over and over: FRR 10.3 can
+        # lose a write (exit 0) made while someone else reads it (evidence/frr_mgmtd_reader2.txt)
+        wait_for(lambda: rstate(m, "repairs") == "1", "repairs = 1", timeout=30)
+        assert rstate(m, "health") == "ok"
+        assert lab.dev.routes() == TWO_DEV
 
 
 def test_unsupported_route_outside_is_not_touched(lab):
@@ -104,14 +107,16 @@ def test_unsupported_route_outside_is_not_touched(lab):
     with lab.nc() as m:
         redit(m, TWO)
         ecmp = {"198.51.100.0/24": ["203.0.113.10", "203.0.113.9"], "198.51.100.128/25": "blackhole"}
-        lab.dev.set_routes(ecmp)
+        with lab.agent_paused():
+            lab.dev.set_routes(ecmp)
         wait_for(lambda: rstate(m, "health") == "degraded", "routes health degraded", timeout=30)
         assert "2 next hops, only one is supported" in rstate(m, "last-error")
         time.sleep(2)
         assert lab.dev.routes() == ecmp
-        lab.dev.set_routes({})             # someone removes them; the next round puts running back
-        wait_for(lambda: lab.dev.routes() == TWO_DEV, "routes back", timeout=30)
+        with lab.agent_paused():
+            lab.dev.set_routes({})             # someone removes them; the next round puts running back
         wait_for(lambda: rstate(m, "health") == "ok", "routes health ok", timeout=30)
+        assert lab.dev.routes() == TWO_DEV
 
 
 def test_one_edit_two_modules_aborted_together(lab):
@@ -167,10 +172,12 @@ def test_degraded_clears_when_frr_equals_running_again(lab):
     lab.start_agent(every=1)
     with lab.nc() as m:
         redit(m, TWO)
-        lab.dev.set_routes({"198.51.100.0/24": ["203.0.113.10", "203.0.113.9"], "198.51.100.128/25": "blackhole"})
+        with lab.agent_paused():
+            lab.dev.set_routes({"198.51.100.0/24": ["203.0.113.10", "203.0.113.9"], "198.51.100.128/25": "blackhole"})
         wait_for(lambda: rstate(m, "health") == "degraded", "routes health degraded", timeout=30)
         n = len(lab.trace_lines())
-        lab.dev.set_routes(TWO_DEV)
+        with lab.agent_paused():
+            lab.dev.set_routes(TWO_DEV)
         wait_for(lambda: rstate(m, "health") == "ok", "routes health ok", timeout=30)
         assert len(lab.trace_lines()) == n      # nothing applied: FRR already equal
         assert rstate(m, "repairs") == "0"

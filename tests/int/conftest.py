@@ -12,6 +12,7 @@ a test build of labsw (LABSW_BUILD, default <repo>/build). The SSH key pair for
 NETCONF is LABSW_NC_KEY if set, else one made for this test run.
 SPDX-License-Identifier: MIT
 """
+import contextlib
 import getpass
 import json
 import os
@@ -20,6 +21,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -73,6 +75,13 @@ def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def children(pid):
+    kids = []
+    for t in Path(f"/proc/{pid}/task").glob("*/children"):
+        kids += t.read_text().split()
+    return kids
 
 
 def wait_for(cond, what, timeout=10.0):
@@ -155,7 +164,7 @@ class BridgeDevice:
         if other:
             raise RuntimeError("another labswd manages this FRR; stop it first "
                                f"(systemctl stop labswd):\n{other}")
-        self.set_routes({})
+        self.clear_routes()
         subprocess.run(["ip", "netns", "add", self.ns], check=True)
         # vlan_default_pvid 0: a new port has no VLAN at all, like an unlisted port in the model
         self.sh("ip", "link", "add", "br0", "type", "bridge", "vlan_filtering", "1", "vlan_default_pvid", "0")
@@ -170,7 +179,7 @@ class BridgeDevice:
             self.sh("ip", "link", "set", "lo", "up", ns=h)
 
     def teardown(self):
-        self.set_routes({})
+        self.clear_routes()
         for i in range(1, len(self.ports_) + 1):
             subprocess.run(["ip", "netns", "del", f"{self.ns}-h{i}"], capture_output=True)
         subprocess.run(["ip", "netns", "del", self.ns], capture_output=True)
@@ -200,15 +209,41 @@ class BridgeDevice:
         return res
 
     def set_routes(self, routes):
-        cmds = []
+        want = {p: sorted(g) if isinstance(g, list) else g for p, g in routes.items()}
+        # read back: FRR 10.3 can drop a write (exit 0) that meets a running agent's read
+        for _ in range(5):
+            cmds = []
+            for p, g in self.routes().items():
+                for nh in (g if isinstance(g, list) else [g]):
+                    cmds.append(f"no ip route {p} {nh}")
+            for p, g in routes.items():
+                for nh in (g if isinstance(g, list) else [g]):
+                    cmds.append(f"ip route {p} {nh}")
+            if cmds:
+                self.vtysh("configure terminal", *cmds)
+            if self.routes() == want:
+                return
+        raise RuntimeError(f"FRR does not take routes {want}: has {self.routes()}")
+
+    def clear_routes(self):
+        """FRR 10.3 (mgmtd) can get out of step with itself: a delete answered with exit 0
+        that leaves the route, then an ECMP route whose first next hop cannot be deleted
+        ("Too few nexthop instances"). Then one route at a time, and if that does not do
+        it either, restart FRR (a test device: its static routes are the tests' own)."""
+        try:
+            self.set_routes({})
+        except subprocess.CalledProcessError:
+            pass
         for p, g in self.routes().items():
-            for nh in (g if isinstance(g, list) else [g]):
-                cmds.append(f"no ip route {p} {nh}")
-        for p, g in routes.items():
-            for nh in (g if isinstance(g, list) else [g]):
-                cmds.append(f"ip route {p} {nh}")
-        if cmds:
-            self.vtysh("configure terminal", *cmds)
+            for nh in reversed(g if isinstance(g, list) else [g]):
+                self.vtysh("configure terminal", f"no ip route {p} {nh}", check=False)
+        if self.routes():
+            print(f"FRR keeps {self.routes()} after deleting: restarting frr", file=sys.stderr)
+            subprocess.run(["systemctl", "restart", "frr"], check=True)
+            wait_for(lambda: subprocess.run([VTYSH, "-c", "show version"], capture_output=True).returncode == 0,
+                     "FRR to come back", timeout=30)
+            if self.routes():
+                raise RuntimeError(f"FRR still has routes after a restart: {self.routes()}")
 
     def agent_prefix(self):
         return ["ip", "netns", "exec", self.ns]
@@ -319,6 +354,21 @@ class Lab:
         start = self.log("labswd").count("labswd: running")
         return self._start("labswd", argv, lambda: self.log("labswd").count("labswd: running") > start)
 
+    @contextlib.contextmanager
+    def agent_paused(self):
+        """labswd stopped (SIGSTOP) with none of its commands running: a change made to the
+        device now cannot meet the agent's reads (FRR 10.3 may drop such a write)"""
+        p = self.procs.get("labswd")
+        if p is None or p.poll() is not None:
+            yield
+            return
+        p.send_signal(signal.SIGSTOP)
+        try:
+            wait_for(lambda: not children(p.pid), "labswd's commands to finish")
+            yield
+        finally:
+            p.send_signal(signal.SIGCONT)
+
     def start_rejector(self):
         return self._start("reject_sub", [str(BUILD / "reject_sub")], lambda: "ready" in self.log("reject_sub"))
 
@@ -342,7 +392,8 @@ class Lab:
             self.stop(name)
         # a build with LABSW_ASAN=ON reports memory errors and leaks when it exits
         for name in ("labswd", "reject_sub"):
-            if "Sanitizer" in self.log(name):
+            # ASan/LSan: "ERROR: AddressSanitizer" / "LeakSanitizer"; UBSan: "runtime error:"
+            if "Sanitizer" in self.log(name) or "runtime error:" in self.log(name):
                 self.sanitizer_report = self.log(name)
         self.dev.teardown()
         for f in Path("/dev/shm").glob(self.prefix + "*"):

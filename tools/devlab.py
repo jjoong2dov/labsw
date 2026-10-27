@@ -7,7 +7,8 @@ start  makes a sysrepo repository of its own in DIR (default ~/.labsw-devlab), w
        DIR/device.json; every command it runs is added to DIR/trace.txt).
        Logs: DIR/netopeer2.log, DIR/labswd.log. Use tools/nc.py to talk to it.
 stop   stops both and removes the shared memory of the repository (DIR stays).
-       `start --fresh` begins with an empty repository again.
+       `start --fresh` deletes DIR as a whole (repository, keys, device.json, trace, logs)
+       and begins again; it refuses a DIR that does not look like a devlab.
 
 Needs the stack (LABSW_PREFIX, default ~/opt/labsw-host, from tools/build_stack.sh host)
 and a test build of labsw in build/ (cmake -DLABSW_TESTING=ON).
@@ -94,6 +95,9 @@ def start(a):
             sys.exit(f"devlab: missing {need}")
     env = env_for(d)
     if a.fresh and d.exists():
+        # rmtree on a wrong --dir would take anything: only a directory devlab made
+        if d.is_symlink() or not ((d / "repo").is_dir() and (d / "device.json").is_file()):
+            sys.exit(f"devlab: {d} does not look like a devlab (no repo/ and device.json); not deleting it")
         shutil.rmtree(d)
     d.mkdir(parents=True, exist_ok=True)
     if not (d / "repo").exists():
@@ -175,7 +179,7 @@ def main():
     ap.add_argument("--dir", type=Path, default=Path(os.environ.get("LABSW_DEVLAB", Path.home() / ".labsw-devlab")))
     ap.add_argument("--port", type=int, default=8301, help="first start only")
     ap.add_argument("--every", type=int, default=5, help="labswd -R: seconds between reconcile rounds")
-    ap.add_argument("--fresh", action="store_true", help="start: throw the old repository away first")
+    ap.add_argument("--fresh", action="store_true", help="start: delete DIR (a devlab) and begin again")
     a = ap.parse_args()
     a.dir = a.dir.expanduser().resolve()
     {"start": start, "stop": stop, "status": status}[a.command](a)

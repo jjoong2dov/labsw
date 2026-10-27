@@ -93,8 +93,13 @@ def run_remote(args, out):
     sh(scp + ["-q", str(build / "labswd"), str(build / "reject_sub"), f"{host}:{rdir}/build/"])
     k = f" -k {shlex.quote(args.k)}" if args.k else ""
     # the route tests use the device's one FRR: an installed labswd service would
-    # fight them over it (it puts its running routes back every few seconds)
+    # fight them over it (it puts its running routes back every few seconds). Its
+    # netopeer2 goes first and comes back last: without labswd it would take edits
+    # and leave the device as it is
     svc = subprocess.run(ssh + ["systemctl is-active labswd.service"], capture_output=True, text=True).stdout.strip()
+    nsvc = subprocess.run(ssh + ["systemctl is-active netopeer2.service"], capture_output=True, text=True).stdout.strip()
+    if nsvc == "active":
+        sh(ssh + ["sudo systemctl stop netopeer2.service"])
     if svc == "active":
         sh(ssh + ["sudo systemctl stop labswd.service"])
     remote = (f"cd {rdir}/tests/int && sudo env LABSW_TARGET=bridge LABSW_PREFIX={args.prefix} "
@@ -108,6 +113,8 @@ def run_remote(args, out):
     finally:  # also on Ctrl-C: do not leave the device without its agent
         if svc == "active":
             sh(ssh + ["sudo systemctl start labswd.service"])
+        if nsvc == "active":
+            sh(ssh + ["sudo systemctl start netopeer2.service"])
     secs = time.monotonic() - t0
     sh(scp + ["-q", f"{host}:{rdir}/junit.xml", str(out / "junit.xml")])
     ver = subprocess.run(ssh + [f"uname -srm; {args.prefix}/sbin/netopeer2-server -V; "

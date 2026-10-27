@@ -19,7 +19,9 @@ Connection: --host/--port/--user/--key, default the devlab of this user
 (127.0.0.1, the port and key in ~/.labsw-devlab). Errors are printed as the server sent them.
 The server's SSH host key is checked against ~/.ssh/known_hosts unless the host is this
 machine (127.0.0.1: the devlab, or a VM behind a forwarded port) or --no-hostkey-check is
-given. Add a device once with: ssh-keyscan -p 830 <device> >> ~/.ssh/known_hosts
+given. Add a device once: ssh-keyscan -p 830 <device> > k; ssh-keygen -lf k shows its
+fingerprint; compare it with the device's own (on its console: ssh-keygen -lf
+/etc/ssh/ssh_host_ed25519_key.pub), then cat k >> ~/.ssh/known_hosts
 SPDX-License-Identifier: MIT
 """
 import argparse
@@ -77,8 +79,9 @@ def main():
         m = manager.connect(host=a.host, port=a.port, username=a.user, password="", key_filename=a.key,
                             hostkey_verify=check, allow_agent=False, look_for_keys=False, timeout=30)
     except SSHUnknownHostError:
-        sys.exit(f"nc.py: the host key of {a.host}:{a.port} is not in ~/.ssh/known_hosts; check it, then: "
-                 f"ssh-keyscan -p {a.port} {a.host} >> ~/.ssh/known_hosts")
+        sys.exit(f"nc.py: the host key of {a.host}:{a.port} is not in ~/.ssh/known_hosts. Get it with "
+                 f"ssh-keyscan -p {a.port} {a.host} > k; ssh-keygen -lf k, compare the fingerprint with "
+                 f"the device's own (on its console), then cat k >> ~/.ssh/known_hosts")
     try:
         if a.command == "hello":
             print(f"session-id {m.session_id}")

@@ -5,8 +5,22 @@
 # SPDX-License-Identifier: MIT
 set -euo pipefail
 N=${LAB_PORTS:-4}
-ip link show br0 >/dev/null 2>&1 && exit 0
+# br0 carries the alias "labsw-lab" so that lab_down.sh removes only what this made
+if ip link show br0 >/dev/null 2>&1; then
+  [ "$(cat /sys/class/net/br0/ifalias 2>/dev/null)" = labsw-lab ] && exit 0
+  # made by an older lab_up.sh (no alias yet): p1 is its port
+  if [ "$(basename "$(readlink /sys/class/net/p1/master 2>/dev/null)")" = br0 ]; then
+    ip link set br0 alias labsw-lab; exit 0
+  fi
+  echo "lab_up.sh: br0 exists and is not the lab's; not touching it" >&2; exit 1
+fi
+for i in $(seq 1 "$N"); do
+  if ip netns list | grep -qw "h$i" || ip link show "p$i" >/dev/null 2>&1; then
+    echo "lab_up.sh: netns h$i or link p$i exists already; not touching it" >&2; exit 1
+  fi
+done
 ip link add br0 type bridge vlan_filtering 1 vlan_default_pvid 0
+ip link set br0 alias labsw-lab
 ip link set br0 up
 for i in $(seq 1 "$N"); do
   ip netns add h$i
