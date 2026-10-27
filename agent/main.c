@@ -71,11 +71,14 @@ static struct {
     atomic_uint callbacks; /* bumped when a change callback starts; reconcile checks it */
     struct lsw_state seen; /* last device state read while no change ran (g.lock) */
     int seen_valid;
-    sr_session_ctx_t *nsess;  /* notifications are sent on this session */
+    sr_session_ctx_t *nsess;  /* notifications are sent on this session, under notif_lock */
+    pthread_mutex_t notif_lock; /* change callbacks and the reconcile loop both call notify():
+                                   a sysrepo session must not be used by two threads at once */
     int sent_degraded;        /* health in the last health-changed sent (g.lock) */
     uint64_t sent_repairs;    /* repairs in the last repaired sent (g.lock) */
     char difference[160];     /* the difference the last repair fixed (g.lock) */
-} g = {.lock = PTHREAD_MUTEX_INITIALIZER, .txn_lock = PTHREAD_MUTEX_INITIALIZER};
+} g = {.lock = PTHREAD_MUTEX_INITIALIZER, .txn_lock = PTHREAD_MUTEX_INITIALIZER,
+       .notif_lock = PTHREAD_MUTEX_INITIALIZER};
 
 static void log_line(const char *msg)
 {
@@ -117,7 +120,8 @@ static int send_notif(const char *name, const char *k1, const char *v1, const ch
     return rc;
 }
 
-/* send what changed since the last notifications; call without txn_lock */
+/* send what changed since the last notifications; call without txn_lock. Lock order:
+ * notif_lock, then g.lock (never the other way round) */
 static void notify(void)
 {
     char reason[1024], diff[160], num[24];
@@ -126,6 +130,7 @@ static void notify(void)
 
     if (!g.nsess)
         return;
+    pthread_mutex_lock(&g.notif_lock); /* also keeps the order: compare and send as one step */
     pthread_mutex_lock(&g.lock);
     degraded = g.degraded;
     if (degraded != g.sent_degraded) {
@@ -149,6 +154,7 @@ static void notify(void)
         logf_("notification repaired: %s", num);
         send_notif("repaired", "repairs", num, "difference", diff);
     }
+    pthread_mutex_unlock(&g.notif_lock);
 }
 
 /* /labsw-switch:switch of the session's view -> wanted device state */

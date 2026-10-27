@@ -1,9 +1,13 @@
 #!/bin/bash
 # install.sh <NETCONF user> : on the device (Pi OS / Debian 13 arm64), as root,
-# from an unpacked labsw bundle (tools/pkg.sh). Safe to run again.
+# from an unpacked labsw bundle (tools/pkg.sh). Safe to run again: what is already
+# configured (NACM groups, server users, data) is merged into, not replaced.
+# <NETCONF user> is an account of the device; it may log in with the keys in its
+# ~/.ssh/authorized_keys and is put in the NACM admin group.
 # SPDX-License-Identifier: MIT
 set -euo pipefail
 NC_USER=${1:?usage: install.sh <NETCONF user>}
+id "$NC_USER" >/dev/null 2>&1 || { echo "install.sh: no account $NC_USER on this device" >&2; exit 1; }
 P=/opt/labsw
 cd "$(dirname "$0")"
 apt-get update -qq
@@ -22,16 +26,31 @@ NP2_MODULE_DIR=$P/share/yang/modules/netopeer2 LN2_MODULE_DIR=$P/share/yang/modu
   bash $P/share/netopeer2/scripts/setup.sh >/dev/null
 bash $P/share/netopeer2/scripts/merge_hostkey.sh >/dev/null
 bash $P/share/netopeer2/scripts/merge_config.sh >/dev/null
+# merge_config.sh lets in only the user who ran sudo (and only on a first install):
+# add <NETCONF user> to every SSH endpoint, with the keys of that account
+users=$(mktemp)
+{ printf '<netconf-server xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-server"><listen><endpoints>'
+  sysrepocfg -X -x "/ietf-netconf-server:netconf-server/listen/endpoints/endpoint[ssh]/name" -d running -f xml |
+    sed -n 's|.*<name>\(.*\)</name>.*|\1|p' | while read -r ep; do
+      printf '<endpoint><name>%s</name><ssh><ssh-server-parameters><client-authentication><users><user><name>%s</name>' "$ep" "$NC_USER"
+      printf '<public-keys><use-system-keys xmlns="urn:cesnet:libnetconf2-netconf-server"/></public-keys>'
+      printf '</user></users></client-authentication></ssh-server-parameters></ssh></endpoint>'
+    done
+  printf '</endpoints></listen></netconf-server>\n'; } > "$users"
+sysrepocfg --edit="$users" -d startup -m ietf-netconf-server -f xml
+sysrepocfg --edit="$users" -d running -m ietf-netconf-server -f xml
+rm -f "$users"
 # the modules of this bundle only (the directory may hold files of an older install);
 # a module already there with the same revision is left as it is, a new revision goes
 # through labsw-upgrade (rehearsal on a copy, saved old state; stops on data loss
-# unless LABSW_ALLOW_LOSS=1). The new agent is installed only after this.
+# unless LABSW_ALLOW_LOSS=1, exactly). The new agent is installed only after this.
 for m in yang/*.yang; do
   name=$(basename "$m" .yang); rev=${name#*@}; name=${name%@*}
   have=$(sysrepoctl -l | awk -F'|' -v n="$name" '{gsub(/ /,"",$1); gsub(/ /,"",$2)} $1==n {print $2}')
   if [ -z "$have" ]; then sysrepoctl -i "$P/share/yang/modules/labsw/$(basename "$m")"
   elif [ "$have" != "$rev" ]; then
-    $P/sbin/labsw-upgrade "$P/share/yang/modules/labsw/$(basename "$m")" ${LABSW_ALLOW_LOSS:+--allow-loss}
+    allow=; [ "${LABSW_ALLOW_LOSS:-0}" = 1 ] && allow=--allow-loss   # exactly 1, not any value
+    $P/sbin/labsw-upgrade "$P/share/yang/modules/labsw/$(basename "$m")" $allow
   fi
 done
 install -m 755 labswd $P/sbin/

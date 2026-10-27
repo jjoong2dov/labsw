@@ -3,7 +3,9 @@
 
   host    on this PC: unit tests (ctest) + integration tests with the mock adapters
   remote  on a VM or the Pi over SSH: integration tests against the real bridge and
-          FRR (LABSW_TARGET=bridge, as root). Copies the tests and their fixtures, the
+          FRR (LABSW_TARGET=bridge, as root). Only on a lab device: it replaces
+          ~/labsw-verify there and removes every IPv4 static route of the device's FRR
+          before and after each route test; a running labswd service is stopped meanwhile. Copies the tests and their fixtures, the
           YANG modules, the upgrade tools and a test build for the device
           (tools/xbuild.sh) to ~/labsw-verify there.
 
@@ -100,11 +102,13 @@ def run_remote(args, out):
               f"python3 -m pytest -q -p no:cacheprovider -rfEs --junitxml=$HOME/{rdir}/junit.xml{k}; "
               f"sudo chown $(id -u) $HOME/{rdir}/junit.xml")
     t0 = time.monotonic()
-    with open(out / "console.log", "w") as log:
-        subprocess.run(ssh + [remote], stdout=log, stderr=subprocess.STDOUT)
+    try:
+        with open(out / "console.log", "w") as log:
+            subprocess.run(ssh + [remote], stdout=log, stderr=subprocess.STDOUT)
+    finally:  # also on Ctrl-C: do not leave the device without its agent
+        if svc == "active":
+            sh(ssh + ["sudo systemctl start labswd.service"])
     secs = time.monotonic() - t0
-    if svc == "active":
-        sh(ssh + ["sudo systemctl start labswd.service"])
     sh(scp + ["-q", f"{host}:{rdir}/junit.xml", str(out / "junit.xml")])
     ver = subprocess.run(ssh + [f"uname -srm; {args.prefix}/sbin/netopeer2-server -V; "
                                 "sudo /usr/bin/vtysh -c 'show version' | head -1"], capture_output=True, text=True)

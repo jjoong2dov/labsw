@@ -17,6 +17,9 @@ FILTER is a subtree filter, e.g. '<switch xmlns="urn:example:labsw-switch"/>'.
 --with-defaults report-all|trim|explicit|report-all-tagged for get and get-config (RFC 6243).
 Connection: --host/--port/--user/--key, default the devlab of this user
 (127.0.0.1, the port and key in ~/.labsw-devlab). Errors are printed as the server sent them.
+The server's SSH host key is checked against ~/.ssh/known_hosts unless the host is this
+machine (127.0.0.1: the devlab, or a VM behind a forwarded port) or --no-hostkey-check is
+given. Add a device once with: ssh-keyscan -p 830 <device> >> ~/.ssh/known_hosts
 SPDX-License-Identifier: MIT
 """
 import argparse
@@ -28,6 +31,7 @@ from pathlib import Path
 
 from ncclient import manager
 from ncclient.operations import RPCError
+from ncclient.transport.errors import SSHUnknownHostError
 from ncclient.xml_ import to_ele, to_xml
 
 NC = "urn:ietf:params:xml:ns:netconf:base:1.0"
@@ -59,6 +63,8 @@ def main():
                     default=int((devlab / "port").read_text()) if (devlab / "port").exists() else 830)
     ap.add_argument("--user", default=getpass.getuser())
     ap.add_argument("--key", default=str(devlab / "client_key"))
+    ap.add_argument("--no-hostkey-check", action="store_true",
+                    help="do not check the server's host key (only on a network you trust)")
     ap.add_argument("--source", default="running")
     ap.add_argument("--target", default="running")
     ap.add_argument("--default-operation", choices=["merge", "replace", "none"])
@@ -66,8 +72,13 @@ def main():
     a = ap.parse_intermixed_args()  # options may come after the command
 
     # password="": ncclient 0.6.x fails on None when it falls back to password authentication
-    m = manager.connect(host=a.host, port=a.port, username=a.user, password="", key_filename=a.key,
-                        hostkey_verify=False, allow_agent=False, look_for_keys=False, timeout=30)
+    check = not a.no_hostkey_check and a.host not in ("127.0.0.1", "localhost", "::1")
+    try:
+        m = manager.connect(host=a.host, port=a.port, username=a.user, password="", key_filename=a.key,
+                            hostkey_verify=check, allow_agent=False, look_for_keys=False, timeout=30)
+    except SSHUnknownHostError:
+        sys.exit(f"nc.py: the host key of {a.host}:{a.port} is not in ~/.ssh/known_hosts; check it, then: "
+                 f"ssh-keyscan -p {a.port} {a.host} >> ~/.ssh/known_hosts")
     try:
         if a.command == "hello":
             print(f"session-id {m.session_id}")

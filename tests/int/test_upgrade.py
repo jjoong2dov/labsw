@@ -74,3 +74,24 @@ def test_data_loss_is_found_before_and_rollback_brings_it_back(lab):
     with lab.nc() as m:
         assert running_switch(m) == before
     assert lab.ports() == ACCESS10_DEV
+
+
+def _check_tool():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("upgrade_check", str(REPO / "tools/labsw-upgrade-check"))
+    spec = importlib.util.spec_from_loader("upgrade_check", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_composite_key_loss_is_not_hidden():
+    """two entries share the first key: losing one must be reported (named by the first
+    member only, the second entry hid the first — Codex review)"""
+    uc = _check_tool()
+    before = {"m:x": {"l": [{"k1": "a", "k2": "x", "v": 1}, {"k1": "a", "k2": "y", "v": 2}]}}
+    after = {"m:x": {"l": [{"k1": "a", "k2": "y", "v": 2}]}}
+    for keys in ({"/x/l": ["k1", "k2"]}, {}):        # keys known from the module, or not
+        lost = set(uc.leaves(before, keys)) - set(uc.leaves(after, keys))
+        assert any("k2=x" in p and p.endswith("/v") for p in lost), keys

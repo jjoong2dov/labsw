@@ -41,19 +41,43 @@ def export(module, ds, env):
     return json.loads(out) if out.strip() else {}
 
 
-def leaves(node, path=""):
-    """flatten JSON data into {path: value}. A list entry is named by its first
-    member: libyang prints the keys first, so with one key that is the key; a list
-    with several keys may report more lines than were really lost."""
+TREE_LINE = re.compile(r"^([ |]*)\+--[rwox-]+ ([\w.-]+)\*?(?:\s+\[([^\]]+)\])?")
+
+
+def list_keys(module, repo, env):
+    """{schema path of a list: [its keys]} of the installed module, from `yanglint -f tree`
+    (e.g. "/switch/port": ["name"]). Empty if it cannot be read: then every list entry is
+    named by all its scalar members (more lines reported, never fewer)."""
+    files = sorted((repo / "yang").glob(f"{module}@*.yang"))
+    if not files:
+        return {}
+    r = run(["yanglint", "-p", str(repo / "yang"), "-f", "tree", str(files[-1])], env, check=False)
+    keys, stack = {}, []
+    for line in r.stdout.splitlines():
+        m = TREE_LINE.match(line)
+        if not m:
+            continue
+        depth = len(m.group(1)) // 3
+        del stack[depth:]
+        stack.append(m.group(2))
+        if m.group(3):
+            keys["/" + "/".join(stack)] = m.group(3).split()
+    return keys
+
+
+def leaves(node, keys, path="", spath=""):
+    """flatten JSON data into {path: value}; a list entry is named by all its keys
+    (/switch/port[name=p1]/vlan[vid=10]/pvid), so entries never collide"""
     res = {}
     if isinstance(node, dict):
         for k, v in node.items():
-            res.update(leaves(v, f"{path}/{k}"))
+            res.update(leaves(v, keys, f"{path}/{k}", f"{spath}/{k.split(':')[-1]}"))
     elif isinstance(node, list):
         for e in node:
             if isinstance(e, dict):
-                k, v = next(iter(e.items()), ("", ""))
-                res.update(leaves(e, f"{path}[{k}={v}]"))
+                names = keys.get(spath) or [k for k, v in e.items() if not isinstance(v, (dict, list))]
+                ident = ",".join(f"{k}={e.get(k)}" for k in names)
+                res.update(leaves(e, keys, f"{path}[{ident}]", spath))
             else:
                 res[f"{path}[.={e}]"] = e
     else:
@@ -85,6 +109,7 @@ def main(argv):
     real = repository()
     env = dict(os.environ)
     before = {(m, ds): export(m, ds, env) for m in modules for ds in DATASTORES}
+    keys = {m: list_keys(m, real, env) for m in modules}  # of the installed (old) revision
 
     tmp = Path(tempfile.mkdtemp(prefix="lswup"))
     shm = "lswup" + uuid.uuid4().hex[:8]
@@ -108,8 +133,8 @@ def main(argv):
         lost = []
         for m in modules:
             for ds in DATASTORES:
-                after = leaves(export(m, ds, cenv))
-                for path, value in sorted(leaves(before[(m, ds)]).items()):
+                after = leaves(export(m, ds, cenv), keys[m])
+                for path, value in sorted(leaves(before[(m, ds)], keys[m]).items()):
                     if after.get(path) != value:
                         lost.append(f"{ds}: {path} = {value!r}")
         if lost:

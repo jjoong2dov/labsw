@@ -149,6 +149,10 @@ static void test_parse_bad(void **st)
                                    "\"gateway\":\"198.51.100.1\",\"interface\":\"eth0\"}]}}]}]}}]}}}",
                                    &r, err, sizeof(err)), -1);
     assert_string_equal(err, "route 192.0.2.0/24: next hop interface eth0 is not supported");
+    /* only an empty object means "no routes": any other top level is not understood (Codex review) */
+    assert_int_equal(lsw_frr_parse("{\"error\":\"something\"}", &r, err, sizeof(err)), -1);
+    assert_string_equal(err, "FRR output has neither frr-routing:routing nor is it empty");
+    assert_int_equal(lsw_frr_parse("{\"frr-routing:other\":{}}", &r, err, sizeof(err)), -1);
     /* fail closed: once frr-routing:routing is there, a shape we do not know is not "no routes" */
     assert_int_equal(lsw_frr_parse("{\"frr-routing:routing\":{}}", &r, err, sizeof(err)), -1);
     assert_string_equal(err, "FRR output has no frr-routing:routing/control-plane-protocols/control-plane-protocol");

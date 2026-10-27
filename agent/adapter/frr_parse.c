@@ -140,10 +140,14 @@ int lsw_frr_parse(const char *json, struct lsw_routes *out, char *err, size_t le
         goto end;
     }
     /* FRR 10.3 prints {} when nothing was configured since it started: no routes.
-     * Once frr-routing:routing is there, a shape we do not know is an error, never
-     * "no routes" (that would add every route of running on top of what FRR has). */
+     * Any other shape we do not know is an error, never "no routes" (that would add
+     * every route of running on top of what FRR has): without frr-routing:routing
+     * only an empty object is accepted. */
     if (!json_object_object_get_ex(root, "frr-routing:routing", &protos)) {
-        rc = 0;
+        if (json_object_object_length(root) == 0)
+            rc = 0;
+        else
+            snprintf(err, len, "FRR output has neither frr-routing:routing nor is it empty");
         goto end;
     }
     protos = get(get(get(root, "frr-routing:routing", json_type_object), "control-plane-protocols", json_type_object),
