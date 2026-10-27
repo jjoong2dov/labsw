@@ -6,3 +6,4 @@ build-aarch64/
 build-aarch64-rel/
 dist/
 build-asan/
+.deps/

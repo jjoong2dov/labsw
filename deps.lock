@@ -1,0 +1,6 @@
+# The NETCONF stack labsw is built and tested with (tools/build_stack.sh reads this).
+# name         repository                                   tag      commit                                     license
+libyang        https://github.com/CESNET/libyang.git         v5.8.6   47351e59e2965e350f9d4098f15ecbe6b3850f6f   BSD-3-Clause
+libnetconf2    https://github.com/CESNET/libnetconf2.git     v4.4.10  2add91c6f2e5864463922aa27293f8956ee9cbbe   BSD-3-Clause
+sysrepo        https://github.com/sysrepo/sysrepo.git        v5.1.0   e92dd4fced5a91b0ae4f7edb20ade978b5f64f91   BSD-3-Clause
+netopeer2      https://github.com/CESNET/netopeer2.git       v2.8.7   5be28a93e783b41d1c284c1275c9b24237d0454d   BSD-3-Clause

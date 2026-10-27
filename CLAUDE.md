@@ -11,7 +11,7 @@ labsw: 라즈베리 파이 4 의 Linux bridge(br0)와 FRR 을 "작은 L2/L3 장�
   - `core/` sysrepo 를 모르는 순수 로직: 상태(state)·계획(plan)·트랜잭션(txn: 적용·되돌리기·검증), 경로(route, rtxn)
   - `adapter/` 장비 쪽: `exec.c`(argv 실행기), `bridge.c`(iproute2 bridge/ip -j), `frr.c`(vtysh), `mock*.c`(JSON 파일로 흉내 낸 장비, 시험 빌드에만)
 - `tests/unit/` cmocka 단위 시험, `tests/int/` pytest+ncclient 통합 시험(실제 sysrepo·netopeer2 + 가짜 장비 또는 실제 bridge)
-- `tools/` verify(장비별 시험 실행·요약), xbuild.sh·pkg.sh(aarch64 묶음), labsw-upgrade(-check)(스키마 업그레이드), lab_up/down.sh
+- `tools/` build_stack.sh(스택 빌드, deps.lock), verify(장비별 시험 실행·요약), sysroot.sh·xbuild.sh·pkg.sh(aarch64 묶음), labsw-upgrade(-check)(스키마 업그레이드), devlab.py·nc.py(PC 에서 갖고 노는 장비와 NETCONF 클라이언트), lab_up/down.sh
 - `deploy/` install.sh, systemd 유닛, NACM
 
 ## 빌드와 시험 (PC, root 없이)
