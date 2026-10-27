@@ -15,7 +15,7 @@ if ip link show br0 >/dev/null 2>&1; then
   echo "lab_up.sh: br0 exists and is not the lab's; not touching it" >&2; exit 1
 fi
 for i in $(seq 1 "$N"); do
-  if ip netns list | grep -qw "h$i" || ip link show "p$i" >/dev/null 2>&1; then
+  if ip netns list | awk '{print $1}' | grep -qx "h$i" || ip link show "p$i" >/dev/null 2>&1; then
     echo "lab_up.sh: netns h$i or link p$i exists already; not touching it" >&2; exit 1
   fi
 done
