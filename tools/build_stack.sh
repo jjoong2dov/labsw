@@ -21,9 +21,12 @@ jobs=${JOBS:-$(nproc)}
 case $mode in
   host)
     prefix=$(realpath -m "${2:-$HOME/opt/labsw-host}")
-    # /etc/sysrepo (the default) needs root; the SHM prefix keeps it apart from a system sysrepo
+    # /etc/sysrepo (the default) needs root. The shared memory prefix cannot be set here
+    # (sysrepo 5.1.0 has it fixed to "sr"; cmake warns that SHM_PREFIX is not used): set
+    # SYSREPO_SHM_PREFIX when running, as tools/devlab.py and the tests do, or this repository
+    # and a system sysrepo would meet in /dev/shm ("Shared memory repository path mismatch")
     opts=(-DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_PREFIX_PATH="$prefix" -DREPO_PATH="$prefix/var/sysrepo"
-          -DSHM_PREFIX=labswh -DNOTIFD_SETUP=OFF -DSYSREPO_SETUP=OFF)
+          -DNOTIFD_SETUP=OFF -DSYSREPO_SETUP=OFF)
     export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     destdir=;;
   aarch64)
