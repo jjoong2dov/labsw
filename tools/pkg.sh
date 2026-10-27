@@ -6,8 +6,10 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 stage=$(realpath "$1"); build=$(realpath "$2"); out=$(realpath -m "${3:-$here/dist/labsw-bundle.tgz}")
-if "$build/labswd" -h 2>&1 | grep -q "test build"; then
-  echo "pkg.sh: $build is a test build (LABSW_TESTING=ON); build without it" >&2; exit 1
+# a test build has the mock adapter and fault injection: never ship one. Asked from the
+# build's cache, not by running labswd (an aarch64 program does not run on the PC)
+if ! grep -qx "LABSW_TESTING:BOOL=OFF" "$build/CMakeCache.txt" 2>/dev/null; then
+  echo "pkg.sh: $build is not a build with LABSW_TESTING=OFF (see its CMakeCache.txt)" >&2; exit 1
 fi
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
 d=$t/labsw; mkdir -p "$d/yang" "$d/systemd"

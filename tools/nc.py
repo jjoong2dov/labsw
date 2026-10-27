@@ -116,9 +116,11 @@ def main():
                 if n is not None:
                     print(pretty(n.notification_xml), flush=True)
     except RPCError as e:
-        print(f"rpc-error: {e.tag}: {e.message}", file=sys.stderr)
-        if e.path:
-            print(f"  error-path: {e.path}", file=sys.stderr)
+        # several <rpc-error> in one reply come as one RPCError holding them in .errlist
+        for err in getattr(e, "errlist", None) or [e]:
+            print(f"rpc-error: {err.tag}: {err.message}", file=sys.stderr)
+            if err.path:
+                print(f"  error-path: {err.path}", file=sys.stderr)
         sys.exit(1)
     finally:
         m.close_session()
