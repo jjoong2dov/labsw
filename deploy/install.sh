@@ -35,10 +35,12 @@ for m in yang/*.yang; do
   fi
 done
 install -m 755 labswd $P/sbin/
-sed "s/NC_USER/$NC_USER/" nacm_admin.xml > /tmp/labsw-nacm.xml
-sysrepocfg --import=/tmp/labsw-nacm.xml -d startup -m ietf-netconf-acm -f xml
-sysrepocfg --import=/tmp/labsw-nacm.xml -d running -m ietf-netconf-acm -f xml
-rm -f /tmp/labsw-nacm.xml
+# merge the admin group and rule (--edit), do not replace the module (--import): groups
+# and rules added on the device must survive running this script again
+nacm=$(mktemp); sed "s/NC_USER/$NC_USER/" nacm_admin.xml > "$nacm"
+sysrepocfg --edit="$nacm" -d startup -m ietf-netconf-acm -f xml
+sysrepocfg --edit="$nacm" -d running -m ietf-netconf-acm -f xml
+rm -f "$nacm"
 systemctl daemon-reload
 systemctl enable labsw-lab.service netopeer2.service labswd.service
 systemctl restart labsw-lab.service netopeer2.service labswd.service
