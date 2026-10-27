@@ -146,6 +146,9 @@ def start(a):
             stop(a)
             sys.exit(f"devlab: labswd exited, see {d / 'labswd.log'}")
         time.sleep(0.1)
+    else:
+        stop(a)
+        sys.exit(f"devlab: labswd did not say it is running within 10 s, see {d / 'labswd.log'}")
     print(f"devlab: NETCONF on 127.0.0.1:{port}, user {getpass.getuser()}, key {d / 'client_key'}")
     print(f"        device {d / 'device.json'}, commands {d / 'trace.txt'}, logs {d}/*.log")
     print("        try: tools/nc.py hello")

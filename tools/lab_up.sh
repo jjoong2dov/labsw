@@ -25,11 +25,14 @@ for i in $(seq 1 "$N"); do
     echo "lab_up.sh: netns h$i or link p$i exists already; not touching it" >&2; exit 1
   fi
 done
+# what this makes, for lab_down.sh (in /run: gone at reboot, like the namespaces)
+MADE=/run/labsw-lab.made
+: > $MADE
 ip link add br0 type bridge vlan_filtering 1 vlan_default_pvid 0
 ip link set br0 alias labsw-lab
 ip link set br0 up
 for i in $(seq 1 "$N"); do
-  ip netns add h$i
+  ip netns add h$i && echo "h$i" >> $MADE
   ip link add p$i type veth peer name e$i
   ip link set e$i netns h$i
   ip link set p$i master br0 up

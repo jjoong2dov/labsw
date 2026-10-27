@@ -5,7 +5,8 @@
   remote  on a VM or the Pi over SSH: integration tests against the real bridge and
           FRR (LABSW_TARGET=bridge, as root). Only on a lab device: it replaces
           ~/labsw-verify there and removes every IPv4 static route of the device's FRR
-          before and after each route test; a running labswd service is stopped meanwhile. Copies the tests and their fixtures, the
+          before and after each route test; the installed netopeer2 and labswd services are
+          stopped meanwhile (netopeer2 first) and started again. Copies the tests and their fixtures, the
           YANG modules, the upgrade tools and a test build for the device
           (tools/xbuild.sh) to ~/labsw-verify there.
 
