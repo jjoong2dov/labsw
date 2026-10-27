@@ -96,10 +96,13 @@ def start(a):
     env = env_for(d)
     if a.fresh and d.exists():
         # rmtree on a wrong --dir would take anything: only a directory devlab made
-        if d.is_symlink() or not ((d / "repo").is_dir() and (d / "device.json").is_file()):
-            sys.exit(f"devlab: {d} does not look like a devlab (no repo/ and device.json); not deleting it")
+        # (repo/yang: a sysrepo repository, also left by a start that failed half-way)
+        if d.is_symlink() or not (d / "repo/yang").is_dir():
+            sys.exit(f"devlab: {d} does not look like a devlab (no sysrepo repository in repo/); not deleting it")
         shutil.rmtree(d)
     d.mkdir(parents=True, exist_ok=True)
+    if (d / "repo").exists() and not (d / "device.json").exists():
+        sys.exit(f"devlab: {d} was left half-made by a start that failed; start --fresh")
     if not (d / "repo").exists():
         print(f"making the repository in {d / 'repo'} ...")
         subprocess.run([str(REPO / "tests/int/mkrepo.sh"), str(d / "repo")], env=env, check=True,

@@ -7,7 +7,13 @@ set -euo pipefail
 N=${LAB_PORTS:-4}
 # br0 carries the alias "labsw-lab" so that lab_down.sh removes only what this made
 if ip link show br0 >/dev/null 2>&1; then
-  [ "$(cat /sys/class/net/br0/ifalias 2>/dev/null)" = labsw-lab ] && exit 0
+  if [ "$(cat /sys/class/net/br0/ifalias 2>/dev/null)" = labsw-lab ]; then
+    for i in $(seq 1 "$N"); do   # all there, or say so (lab_down.sh, then again)
+      [ "$(basename "$(readlink /sys/class/net/p$i/master 2>/dev/null)")" = br0 ] ||
+        { echo "lab_up.sh: br0 is the lab's but p$i is missing; run lab_down.sh first" >&2; exit 1; }
+    done
+    exit 0
+  fi
   # made by an older lab_up.sh (no alias yet): p1 is its port
   if [ "$(basename "$(readlink /sys/class/net/p1/master 2>/dev/null)")" = br0 ]; then
     ip link set br0 alias labsw-lab; exit 0
