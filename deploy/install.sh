@@ -12,6 +12,9 @@ P=/opt/labsw
 cd "$(dirname "$0")"
 apt-get update -qq
 apt-get install -y -qq libssh-4 libcurl4t64 libjson-c5 libpcre2-8-0 openssl iproute2 frr python3 >/dev/null
+# no NETCONF edits while the stack and the modules change (the upgrade rehearsal is not a
+# snapshot), and no running program on libraries being replaced; started again at the end
+systemctl stop netopeer2.service labswd.service 2>/dev/null || true
 tar -C / --no-same-owner -xzf labsw-stack.tgz
 install -m 755 lab_up.sh lab_down.sh labsw-upgrade labsw-upgrade-check $P/sbin/
 install -d $P/share/yang/modules/labsw

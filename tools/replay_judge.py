@@ -95,6 +95,7 @@ def main(ch, src=None, extra_env=""):
     out = REPO / "results" / f"judge-{ch}-{time.strftime('%Y%m%d-%H%M%S')}"
     work = out / "tree"
     work.mkdir(parents=True)
+    # the tree this runs in (the judged REV is taken as committed, whatever this says)
     dirty = subprocess.run(["git", "-C", str(repo), "status", "--short"], capture_output=True, text=True).stdout
     subprocess.run(f"git -C {repo} archive {rev} | tar -x -C {work}", shell=True, check=True)
     acc = work / "tests/accept"
@@ -128,7 +129,7 @@ def main(ch, src=None, extra_env=""):
     p = subprocess.run(["bash", "-c", f"{env_sh} && cd {acc} && {extra_env.replace('BUILD', str(work / 'build'))} {VENV_PY} -m pytest -q -p no:cacheprovider -rfE "
                                       f"--junitxml={out}/junit.xml > {out}/pytest.log 2>&1"])
     tail = (out / "pytest.log").read_text().strip().splitlines()[-1:] if (out / "pytest.log").exists() else []
-    summary = {"chapter": ch, "judged": f"{repo.name}:{head}", "extra_env": extra_env, "uncommitted": dirty, "reference": ref,
+    summary = {"chapter": ch, "judged": f"{repo.name}:{head}", "extra_env": extra_env, "main_tree_uncommitted": dirty, "reference": ref,
                "build_and_unit_ok": b.returncode == 0, "pytest_exit": p.returncode,
                "pytest": tail[0] if tail else None, "seconds": round(time.monotonic() - t0, 1)}
     (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
