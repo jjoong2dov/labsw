@@ -9,6 +9,7 @@
                              --default-operation merge|replace|none
   copy SOURCE TARGET         <copy-config>, e.g. copy running startup
   commit / discard           <commit> / <discard-changes> of the candidate
+  lock [SECONDS]             <lock> running (or --target), hold it SECONDS (default 30), <unlock>
   rpc FILE|-                 any RPC: the XML of its element, e.g. <backup xmlns="urn:example:labsw-ops">...
   listen [SECONDS]           <create-subscription>, then print notifications (default 60 s)
 
@@ -51,7 +52,7 @@ def main():
     devlab = Path(os.environ.get("LABSW_DEVLAB", Path.home() / ".labsw-devlab"))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["hello", "get-config", "get", "edit", "copy", "commit", "discard", "rpc",
-                                        "listen"])
+                                        "listen", "lock"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int,
@@ -97,6 +98,12 @@ def main():
             print(pretty(m.commit().xml))
         elif a.command == "discard":
             print(pretty(m.discard_changes().xml))
+        elif a.command == "lock":
+            secs = float(a.args[0]) if a.args else 30
+            print(pretty(m.lock(a.target).xml), flush=True)
+            print(f"holding the lock on {a.target} for {secs:.0f} s (session {m.session_id}) ...", flush=True)
+            time.sleep(secs)
+            print(pretty(m.unlock(a.target).xml))
         elif a.command == "rpc":
             print(pretty(m.dispatch(to_ele(read(a.args[0]))).xml))
         elif a.command == "listen":
