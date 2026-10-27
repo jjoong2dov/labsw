@@ -145,14 +145,24 @@ static void notify(void)
         snprintf(diff, sizeof(diff), "%s", g.difference);
     }
     pthread_mutex_unlock(&g.lock);
+    /* "sent" was set above; a notification that could not be sent is tried again next time */
     if (health) {
         logf_("notification health-changed: %s", degraded ? "degraded" : "ok");
-        send_notif("health-changed", "health", degraded ? "degraded" : "ok", "reason", reason);
+        if (send_notif("health-changed", "health", degraded ? "degraded" : "ok", "reason", reason)) {
+            pthread_mutex_lock(&g.lock);
+            g.sent_degraded = !degraded;
+            pthread_mutex_unlock(&g.lock);
+        }
     }
     if (repaired) {
         snprintf(num, sizeof(num), "%llu", (unsigned long long)repairs);
         logf_("notification repaired: %s", num);
-        send_notif("repaired", "repairs", num, "difference", diff);
+        if (send_notif("repaired", "repairs", num, "difference", diff)) {
+            pthread_mutex_lock(&g.lock);
+            if (g.sent_repairs == repairs)
+                g.sent_repairs = repairs - 1;
+            pthread_mutex_unlock(&g.lock);
+        }
     }
     pthread_mutex_unlock(&g.notif_lock);
 }
@@ -693,6 +703,21 @@ int main(int argc, char **argv)
     if ((rc = ops_init(conn, backup_dir, backup_fail_after, log_line, &ops_sub))) {
         logf_("labsw-ops: %s", sr_strerror(rc));
         goto end;
+    }
+    /* the first oper read during a change shows this instead of empty ports */
+    {
+        struct lsw_state dev;
+        char err[256];
+        if (!lsw_state_init(&dev)) {
+            pthread_mutex_lock(&g.txn_lock);
+            if (!g.a->read(g.a, &dev, err, sizeof(err))) {
+                pthread_mutex_lock(&g.lock);
+                g.seen_valid = lsw_state_copy(&g.seen, &dev) == 0;
+                pthread_mutex_unlock(&g.lock);
+            }
+            pthread_mutex_unlock(&g.txn_lock);
+            lsw_state_free(&dev);
+        }
     }
     logf_("running (adapter %s%s%s)", g.a->name, ra ? ", " : "", ra ? ra->name : "");
     for (;;) {

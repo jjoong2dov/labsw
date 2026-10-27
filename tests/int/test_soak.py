@@ -94,6 +94,7 @@ def test_soak(lab):
     agent = lab.start_agent(every=1)
     pid = agent.pid  # `ip netns exec` execs the agent: same pid
     want = {p: {} for p in PORTS}
+    saved = None  # the expected ports of the last backup
     steps = {"edit": 0, "drift": 0, "backup": 0, "restore": 0, "routes": 0, "oper": 0}
     samples = []
     t0 = last = time.monotonic()
@@ -114,10 +115,11 @@ def test_soak(lab):
                 wait_for(lambda: lab.ports() == want, "the agent to put running back", timeout=15)
             elif op == "backup":
                 rpc(m, "backup", "soak")
-            elif op == "restore" and (lab.backups / "soak.json").exists():
+                saved = {p: dict(v) for p, v in want.items()}  # what the backup holds
+            elif op == "restore" and saved is not None:
                 rpc(m, "restore", "soak")
-                # running is now the backup: read it back as the new expectation
-                want = {p: v for p, v in lab.ports().items()}
+                want = saved  # the device must now be what it was at the backup, not just stable
+                assert lab.ports() == want, f"after restore {sum(steps.values())}"
                 time.sleep(1.5)  # a reconcile round must find nothing to do
                 assert lab.ports() == want
             elif op == "routes":
