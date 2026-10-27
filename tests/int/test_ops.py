@@ -135,3 +135,31 @@ def test_backup_directory_is_made_when_needed(lab):
         rpc(m, "backup", "first")
     assert (lab.backups / "first.json").exists()
     assert oct(lab.backups.stat().st_mode & 0o777) == "0o700"
+
+
+def test_rpcs_need_nacm_permission(lab):
+    """NACM lets anyone execute an RPC unless the RPC is default-deny-all, and restore
+    writes running through the agent's own session: without that, a user who may not
+    edit could change running by restoring a backup (seen on a VM before the fix)"""
+    lab.start_agent()
+    with lab.nc() as m:
+        edit(m, ACCESS10)
+        rpc(m, "backup", "a")
+        m.edit_config(target="running", config='<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">'
+                      '<switch xmlns="urn:example:labsw-switch" '
+                      'xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" nc:operation="replace">'
+                      f'{OTHER}</switch></config>')
+        before = running_switch(m)
+    with lab.nc("reader") as r:
+        assert "<switch" in running_switch(r)              # reading is allowed
+        with pytest.raises(RPCError) as e:
+            edit(r, ACCESS10)
+        assert e.value.tag == "access-denied"
+        for name in ("restore", "backup"):
+            with pytest.raises(RPCError) as e:
+                rpc(r, name, "a")
+            assert e.value.tag == "access-denied", name
+    with lab.nc() as m:
+        assert running_switch(m) == before
+    assert lab.ports() == OTHER_DEV
+    assert sorted(p.name for p in lab.backups.iterdir()) == ["a.json"]

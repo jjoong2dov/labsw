@@ -50,6 +50,12 @@ SERVER_XML = """\
      <public-key-format xmlns:ct="urn:ietf:params:xml:ns:yang:ietf-crypto-types">ct:ssh-public-key-format</public-key-format>
      <public-key>{pubkey}</public-key>
     </public-key>
+   </inline-definition></public-keys></user>
+   <user><name>reader</name><public-keys><inline-definition>
+    <public-key><name>test</name>
+     <public-key-format xmlns:ct="urn:ietf:params:xml:ns:yang:ietf-crypto-types">ct:ssh-public-key-format</public-key-format>
+     <public-key>{pubkey}</public-key>
+    </public-key>
    </inline-definition></public-keys></user></users></client-authentication>
   </ssh-server-parameters>
  </ssh></endpoint></endpoints></listen>
@@ -350,9 +356,10 @@ class Lab:
         return self.dev.commands(self)
 
     # --- NETCONF -----------------------------------------------------------
-    def nc(self):
+    def nc(self, user=None):
+        """user: default the admin (NACM permit-all); "reader" is in no NACM group"""
         # password="": ncclient 0.6.17 (Debian 13) fails with AttributeError on None
-        return manager.connect(host="127.0.0.1", port=self.port, username=self.user,
+        return manager.connect(host="127.0.0.1", port=self.port, username=user or self.user,
                                password="", key_filename=str(KEY), hostkey_verify=False,
                                allow_agent=False, look_for_keys=False, timeout=20)
 

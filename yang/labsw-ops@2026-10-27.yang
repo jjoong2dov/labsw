@@ -3,6 +3,10 @@ module labsw-ops {
   namespace "urn:example:labsw-ops";
   prefix lops;
 
+  import ietf-netconf-acm {
+    prefix nacm;
+  }
+
   organization
     "labsw (example code for the book)";
   description
@@ -12,7 +16,13 @@ module labsw-ops {
      A backup is a JSON file on the device. Restore replaces both
      modules in running in one transaction: if the agent cannot apply
      the backup to the bridge or FRR, running and the device stay as
-     they were.";
+     they were.
+
+     Both RPCs are nacm:default-deny-all. NACM lets any user execute
+     an RPC unless a rule says otherwise, and restore writes running
+     through the agent's own session, where NACM does not look: a
+     user without write access could otherwise change running by
+     restoring a backup.";
 
   revision 2026-10-27 {
     description
@@ -30,6 +40,7 @@ module labsw-ops {
   }
 
   rpc backup {
+    nacm:default-deny-all;
     description
       "Save running of labsw-switch and labsw-route. An existing
        backup of the same name is replaced only when the new file is
@@ -48,6 +59,7 @@ module labsw-ops {
   }
 
   rpc restore {
+    nacm:default-deny-all;
     description
       "Replace running of labsw-switch and labsw-route with a backup.";
     input {
